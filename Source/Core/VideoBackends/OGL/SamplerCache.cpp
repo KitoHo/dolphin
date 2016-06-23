@@ -1,26 +1,52 @@
 // Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
-#include "VideoBackends/OGL/GLInterfaceBase.h"
+#include <memory>
+
+#include "Common/CommonFuncs.h"
+#include "Common/CommonTypes.h"
+#include "Common/GL/GLInterfaceBase.h"
 #include "VideoBackends/OGL/SamplerCache.h"
-#include "VideoCommon/DriverDetails.h"
+#include "VideoCommon/SamplerCommon.h"
+#include "VideoCommon/VideoConfig.h"
 
 namespace OGL
 {
 
-SamplerCache *g_sampler_cache;
+std::unique_ptr<SamplerCache> g_sampler_cache;
 
 SamplerCache::SamplerCache()
 	: m_last_max_anisotropy()
-{}
+{
+	glGenSamplers(2, m_sampler_id);
+	glSamplerParameteri(m_sampler_id[0], GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glSamplerParameteri(m_sampler_id[0], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glSamplerParameteri(m_sampler_id[0], GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glSamplerParameteri(m_sampler_id[0], GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glSamplerParameteri(m_sampler_id[1], GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glSamplerParameteri(m_sampler_id[1], GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glSamplerParameteri(m_sampler_id[1], GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glSamplerParameteri(m_sampler_id[1], GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
 
 SamplerCache::~SamplerCache()
 {
 	Clear();
+	glDeleteSamplers(2, m_sampler_id);
 }
 
-void SamplerCache::SetSamplerState(int stage, const TexMode0& tm0, const TexMode1& tm1)
+void SamplerCache::BindNearestSampler(int stage)
+{
+	glBindSampler(stage, m_sampler_id[0]);
+}
+
+void SamplerCache::BindLinearSampler(int stage)
+{
+	glBindSampler(stage, m_sampler_id[1]);
+}
+
+void SamplerCache::SetSamplerState(int stage, const TexMode0& tm0, const TexMode1& tm1, bool custom_tex)
 {
 	// TODO: can this go somewhere else?
 	if (m_last_max_anisotropy != g_ActiveConfig.iMaxAnisotropy)
@@ -34,8 +60,14 @@ void SamplerCache::SetSamplerState(int stage, const TexMode0& tm0, const TexMode
 	// take equivalent forced linear when bForceFiltering
 	if (g_ActiveConfig.bForceFiltering)
 	{
-		params.tm0.min_filter |= 0x4;
-		params.tm0.mag_filter |= 0x1;
+		params.tm0.min_filter = SamplerCommon::AreBpTexMode0MipmapsEnabled(tm0) ? 6 : 4;
+		params.tm0.mag_filter = 1;
+	}
+
+	// custom textures may have higher resolution, so disable the max_lod
+	if (custom_tex)
+	{
+		params.tm1.max_lod = 255;
 	}
 
 	// TODO: Should keep a circular buffer for each stage of recently used samplers.
@@ -50,7 +82,7 @@ void SamplerCache::SetSamplerState(int stage, const TexMode0& tm0, const TexMode
 	}
 }
 
-auto SamplerCache::GetEntry(const Params& params) -> Value&
+SamplerCache::Value& SamplerCache::GetEntry(const Params& params)
 {
 	auto& val = m_cache[params];
 	if (!val.sampler_id)
@@ -91,9 +123,6 @@ void SamplerCache::SetParameters(GLuint sampler_id, const Params& params)
 	auto& tm0 = params.tm0;
 	auto& tm1 = params.tm1;
 
-	glSamplerParameteri(sampler_id, GL_TEXTURE_MIN_FILTER, min_filters[tm0.min_filter % ArraySize(min_filters)]);
-	glSamplerParameteri(sampler_id, GL_TEXTURE_MAG_FILTER, tm0.mag_filter ? GL_LINEAR : GL_NEAREST);
-
 	glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_S, wrap_settings[tm0.wrap_s]);
 	glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_T, wrap_settings[tm0.wrap_t]);
 
@@ -101,12 +130,28 @@ void SamplerCache::SetParameters(GLuint sampler_id, const Params& params)
 	glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_LOD, tm1.max_lod / 16.f);
 
 	if (GLInterface->GetMode() == GLInterfaceMode::MODE_OPENGL)
-	{
 		glSamplerParameterf(sampler_id, GL_TEXTURE_LOD_BIAS, (s32)tm0.lod_bias / 32.f);
 
-		if (g_ActiveConfig.iMaxAnisotropy > 0)
-			glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)(1 << g_ActiveConfig.iMaxAnisotropy));
+	GLint min_filter = min_filters[tm0.min_filter];
+	GLint mag_filter = tm0.mag_filter ? GL_LINEAR : GL_NEAREST;
+
+	if (g_ActiveConfig.iMaxAnisotropy > 0 && g_ogl_config.bSupportsAniso &&
+	    !SamplerCommon::IsBpTexMode0PointFiltering(tm0))
+	{
+		// https://www.opengl.org/registry/specs/EXT/texture_filter_anisotropic.txt
+		// For predictable results on all hardware/drivers, only use one of:
+		//	GL_LINEAR + GL_LINEAR (No Mipmaps [Bilinear])
+		//	GL_LINEAR + GL_LINEAR_MIPMAP_LINEAR (w/ Mipmaps [Trilinear])
+		// Letting the game set other combinations will have varying arbitrary results;
+		// possibly being interpreted as equal to bilinear/trilinear, implicitly
+		// disabling anisotropy, or changing the anisotropic algorithm employed.
+		min_filter = SamplerCommon::AreBpTexMode0MipmapsEnabled(tm0) ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+		mag_filter = GL_LINEAR;
+		glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)(1 << g_ActiveConfig.iMaxAnisotropy));
 	}
+
+	glSamplerParameteri(sampler_id, GL_TEXTURE_MIN_FILTER, min_filter);
+	glSamplerParameteri(sampler_id, GL_TEXTURE_MAG_FILTER, mag_filter);
 }
 
 void SamplerCache::Clear()

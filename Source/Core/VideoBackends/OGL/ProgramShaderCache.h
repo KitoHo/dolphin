@@ -1,12 +1,17 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2011 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #pragma once
 
+#include <tuple>
+
 #include "Common/LinearDiskCache.h"
+#include "Common/GL/GLUtil.h"
+
 #include "Core/ConfigManager.h"
-#include "VideoBackends/OGL/GLUtil.h"
+
+#include "VideoCommon/GeometryShaderGen.h"
 #include "VideoCommon/PixelShaderGen.h"
 #include "VideoCommon/VertexShaderGen.h"
 
@@ -18,22 +23,18 @@ class SHADERUID
 public:
 	VertexShaderUid vuid;
 	PixelShaderUid puid;
-
-	SHADERUID() {}
-
-	SHADERUID(const SHADERUID& r) : vuid(r.vuid), puid(r.puid) {}
+	GeometryShaderUid guid;
 
 	bool operator <(const SHADERUID& r) const
 	{
-		if (puid < r.puid) return true;
-		if (r.puid < puid) return false;
-		if (vuid < r.vuid) return true;
-		return false;
+		return std::tie(puid, vuid, guid) <
+		       std::tie(r.puid, r.vuid, r.guid);
 	}
 
 	bool operator ==(const SHADERUID& r) const
 	{
-		return puid == r.puid && vuid == r.vuid;
+		return std::tie(puid, vuid, guid) ==
+		       std::tie(r.puid, r.vuid, r.guid);
 	}
 };
 
@@ -46,9 +47,9 @@ struct SHADER
 		glDeleteProgram(glprogid);
 		glprogid = 0;
 	}
-	GLuint glprogid; // opengl program id
+	GLuint glprogid; // OpenGL program id
 
-	std::string strvprog, strpprog;
+	std::string strvprog, strpprog, strgprog;
 
 	void SetProgramVariables();
 	void SetProgramBindings();
@@ -70,20 +71,18 @@ public:
 		}
 	};
 
-	typedef std::map<SHADERUID, PCacheEntry> PCache;
 
-	static PCacheEntry GetShaderProgram(void);
-	static GLuint GetCurrentProgram(void);
-	static SHADER* SetShader(DSTALPHA_MODE dstAlphaMode, u32 components);
-	static void GetShaderId(SHADERUID *uid, DSTALPHA_MODE dstAlphaMode, u32 components);
+	static PCacheEntry GetShaderProgram();
+	static SHADER* SetShader(DSTALPHA_MODE dstAlphaMode, u32 primitive_type);
+	static void GetShaderId(SHADERUID *uid, DSTALPHA_MODE dstAlphaMode, u32 primitive_type);
 
-	static bool CompileShader(SHADER &shader, const char* vcode, const char* pcode);
-	static GLuint CompileSingleShader(GLuint type, const char *code);
+	static bool CompileShader(SHADER &shader, const std::string& vcode, const std::string& pcode, const std::string& gcode = "");
+	static GLuint CompileSingleShader(GLuint type, const std::string& code);
 	static void UploadConstants();
 
-	static void Init(void);
-	static void Shutdown(void);
-	static void CreateHeader(void);
+	static void Init();
+	static void Shutdown();
+	static void CreateHeader();
 
 private:
 	class ProgramShaderCacheInserter : public LinearDiskCacheReader<SHADERUID, u8>
@@ -92,12 +91,14 @@ private:
 		void Read(const SHADERUID &key, const u8 *value, u32 value_size) override;
 	};
 
+	typedef std::map<SHADERUID, PCacheEntry> PCache;
 	static PCache pshaders;
 	static PCacheEntry* last_entry;
 	static SHADERUID last_uid;
 
-	static UidChecker<PixelShaderUid,PixelShaderCode> pixel_uid_checker;
-	static UidChecker<VertexShaderUid,VertexShaderCode> vertex_uid_checker;
+	static UidChecker<PixelShaderUid, ShaderCode> pixel_uid_checker;
+	static UidChecker<VertexShaderUid, ShaderCode> vertex_uid_checker;
+	static UidChecker<GeometryShaderUid, ShaderCode> geometry_uid_checker;
 
 	static u32 s_ubo_buffer_size;
 	static s32 s_ubo_align;

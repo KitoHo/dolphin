@@ -1,13 +1,18 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include <cstring>
+#include <mutex>
+
 #include "Common/Common.h"
+#include "Common/CommonTypes.h"
+#include "Common/Logging/Log.h"
 
 #if HAVE_PORTAUDIO
 
 #include "Core/CoreTiming.h"
-#include "Core/HW/EXI_Device.h"
+#include "Core/HW/EXI.h"
 #include "Core/HW/EXI_DeviceMic.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/SystemTimers.h"
@@ -119,7 +124,7 @@ void CEXIMic::StreamReadOne()
 	if (samples_avail >= buff_size_samples)
 	{
 		s16 *last_buffer = &stream_buffer[stream_rpos];
-		memcpy(ring_buffer, last_buffer, buff_size);
+		std::memcpy(ring_buffer, last_buffer, buff_size);
 
 		samples_avail -= buff_size_samples;
 
@@ -149,7 +154,7 @@ CEXIMic::CEXIMic(int index)
 	buff_size_samples = buff_size / sample_size;
 
 	ring_pos = 0;
-	memset(ring_buffer, 0, sizeof(ring_buffer));
+	std::memset(ring_buffer, 0, sizeof(ring_buffer));
 
 	next_int_ticks = 0;
 
@@ -161,7 +166,7 @@ CEXIMic::~CEXIMic()
 	StreamTerminate();
 }
 
-bool CEXIMic::IsPresent()
+bool CEXIMic::IsPresent() const
 {
 	return true;
 }
@@ -176,8 +181,9 @@ void CEXIMic::SetCS(int cs)
 
 void CEXIMic::UpdateNextInterruptTicks()
 {
-	next_int_ticks = CoreTiming::GetTicks() +
-		(SystemTimers::GetTicksPerSecond() / sample_rate) * buff_size_samples;
+	int diff = (SystemTimers::GetTicksPerSecond() / sample_rate) * buff_size_samples;
+	next_int_ticks = CoreTiming::GetTicks() + diff;
+	ExpansionInterface::ScheduleUpdateInterrupts(diff);
 }
 
 bool CEXIMic::IsInterruptSet()

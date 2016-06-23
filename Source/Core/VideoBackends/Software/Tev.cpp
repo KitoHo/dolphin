@@ -1,18 +1,22 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2009 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #include <cmath>
 
 #include "Common/ChunkFile.h"
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "VideoBackends/Software/DebugUtil.h"
 #include "VideoBackends/Software/EfbInterface.h"
-#include "VideoBackends/Software/SWStatistics.h"
-#include "VideoBackends/Software/SWVideoConfig.h"
 #include "VideoBackends/Software/Tev.h"
 #include "VideoBackends/Software/TextureSampler.h"
-#include "VideoBackends/Software/XFMemLoader.h"
+
+#include "VideoCommon/BoundingBox.h"
+#include "VideoCommon/PerfQueryBase.h"
+#include "VideoCommon/PixelShaderManager.h"
+#include "VideoCommon/Statistics.h"
+#include "VideoCommon/VideoConfig.h"
+#include "VideoCommon/XFMemory.h"
 
 #ifdef _DEBUG
 #define ALLOW_TEV_DUMPS 1
@@ -157,7 +161,7 @@ void Tev::SetRasColor(int colorChan, int swaptable)
 			RasColor[ALP_C] = color[bpmem.tevksel[swaptable].swap2];
 		}
 		break;
-		case 5: // alpha bump
+	case 5: // alpha bump
 		{
 			for (s16& comp : RasColor)
 			{
@@ -346,9 +350,8 @@ static bool AlphaCompare(int alpha, int ref, AlphaTest::CompareMode comp)
 	case AlphaTest::GREATER: return alpha > ref;
 	case AlphaTest::EQUAL:   return alpha == ref;
 	case AlphaTest::NEQUAL:  return alpha != ref;
+	default: return true;
 	}
-
-	return true;
 }
 
 static bool TevAlphaTest(int alpha)
@@ -362,8 +365,8 @@ static bool TevAlphaTest(int alpha)
 	case 1: return comp0 || comp1;   // or
 	case 2: return comp0 ^ comp1;    // xor
 	case 3: return !(comp0 ^ comp1); // xnor
+	default: return true;
 	}
-	return true;
 }
 
 static inline s32 WrapIndirectCoord(s32 coord, int wrapMode)
@@ -373,19 +376,20 @@ static inline s32 WrapIndirectCoord(s32 coord, int wrapMode)
 		case ITW_OFF:
 			return coord;
 		case ITW_256:
-			return (coord % (256 << 7));
+			return (coord & ((256 << 7) - 1));
 		case ITW_128:
-			return (coord % (128 << 7));
+			return (coord & ((128 << 7) - 1));
 		case ITW_64:
-			return (coord % (64 << 7));
+			return (coord & ((64 << 7) - 1));
 		case ITW_32:
-			return (coord % (32 << 7));
+			return (coord & ((32 << 7) - 1));
 		case ITW_16:
-			return (coord % (16 << 7));
+			return (coord & ((16 << 7) - 1));
 		case ITW_0:
 			return 0;
+		default:
+			return 0;
 	}
-	return 0;
 }
 
 void Tev::Indirect(unsigned int stageNum, s32 s, s32 t)
@@ -508,7 +512,16 @@ void Tev::Draw()
 	_assert_(Position[0] >= 0 && Position[0] < EFB_WIDTH);
 	_assert_(Position[1] >= 0 && Position[1] < EFB_HEIGHT);
 
-	INCSTAT(swstats.thisFrame.tevPixelsIn);
+	INCSTAT(stats.thisFrame.tevPixelsIn);
+
+	// initial color values
+	for (int i = 0; i < 4; i++)
+	{
+		Reg[i][RED_C] = PixelShaderManager::constants.colors[i][0];
+		Reg[i][GRN_C] = PixelShaderManager::constants.colors[i][1];
+		Reg[i][BLU_C] = PixelShaderManager::constants.colors[i][2];
+		Reg[i][ALP_C] = PixelShaderManager::constants.colors[i][3];
+	}
 
 	for (unsigned int stageNum = 0; stageNum < bpmem.genMode.numindstages; stageNum++)
 	{
@@ -526,7 +539,7 @@ void Tev::Draw()
 			IndirectLod[stageNum], IndirectLinear[stageNum], texmap, IndirectTex[stageNum]);
 
 #if ALLOW_TEV_DUMPS
-		if (g_SWVideoConfig.bDumpTevStages)
+		if (g_ActiveConfig.bDumpTevStages)
 		{
 			u8 stage[4] = {
 				IndirectTex[stageNum][TextureSampler::ALP_SMP],
@@ -564,7 +577,7 @@ void Tev::Draw()
 			TextureSampler::Sample(TexCoord.s, TexCoord.t, TextureLod[stageNum], TextureLinear[stageNum], texmap, texel);
 
 #if ALLOW_TEV_DUMPS
-			if (g_SWVideoConfig.bDumpTevTextureFetches)
+			if (g_ActiveConfig.bDumpTevTextureFetches)
 				DebugUtil::DrawTempBuffer(texel, DIRECT_TFETCH + stageNum);
 #endif
 
@@ -631,7 +644,7 @@ void Tev::Draw()
 			Reg[ac.dest][ALP_C] = Clamp1024(Reg[ac.dest][ALP_C]);
 
 #if ALLOW_TEV_DUMPS
-		if (g_SWVideoConfig.bDumpTevStages)
+		if (g_ActiveConfig.bDumpTevStages)
 		{
 			u8 stage[4] = {(u8)Reg[0][RED_C], (u8)Reg[0][GRN_C], (u8)Reg[0][BLU_C], (u8)Reg[0][ALP_C]};
 			DebugUtil::DrawTempBuffer(stage, DIRECT + stageNum);
@@ -753,7 +766,7 @@ void Tev::Draw()
 		output[BLU_C] = (output[BLU_C] * invFog + fogInt * bpmem.fog.color.b) >> 8;
 	}
 
-	bool late_ztest = !bpmem.zcontrol.early_ztest || !g_SWVideoConfig.bZComploc;
+	bool late_ztest = !bpmem.zcontrol.early_ztest || !g_ActiveConfig.bZComploc;
 	if (late_ztest && bpmem.zmode.testenable)
 	{
 		// TODO: Check against hw if these values get incremented even if depth testing is disabled
@@ -765,8 +778,14 @@ void Tev::Draw()
 		EfbInterface::IncPerfCounterQuadCount(PQ_ZCOMP_OUTPUT);
 	}
 
+	// branchless bounding box update
+	BoundingBox::coords[BoundingBox::LEFT] = std::min((u16)Position[0], BoundingBox::coords[BoundingBox::LEFT]);
+	BoundingBox::coords[BoundingBox::RIGHT] = std::max((u16)Position[0], BoundingBox::coords[BoundingBox::RIGHT]);
+	BoundingBox::coords[BoundingBox::TOP] = std::min((u16)Position[1], BoundingBox::coords[BoundingBox::TOP]);
+	BoundingBox::coords[BoundingBox::BOTTOM] = std::max((u16)Position[1], BoundingBox::coords[BoundingBox::BOTTOM]);
+
 #if ALLOW_TEV_DUMPS
-	if (g_SWVideoConfig.bDumpTevStages)
+	if (g_ActiveConfig.bDumpTevStages)
 	{
 		for (u32 i = 0; i < bpmem.genMode.numindstages; ++i)
 			DebugUtil::CopyTempBuffer(Position[0], Position[1], INDIRECT, i, "Indirect");
@@ -774,7 +793,7 @@ void Tev::Draw()
 			DebugUtil::CopyTempBuffer(Position[0], Position[1], DIRECT, i, "Stage");
 	}
 
-	if (g_SWVideoConfig.bDumpTevTextureFetches)
+	if (g_ActiveConfig.bDumpTevTextureFetches)
 	{
 		for (u32 i = 0; i <= bpmem.genMode.numtevstages; ++i)
 		{
@@ -785,48 +804,14 @@ void Tev::Draw()
 	}
 #endif
 
-	INCSTAT(swstats.thisFrame.tevPixelsOut);
+	INCSTAT(stats.thisFrame.tevPixelsOut);
 	EfbInterface::IncPerfCounterQuadCount(PQ_BLEND_INPUT);
 
 	EfbInterface::BlendTev(Position[0], Position[1], output);
 }
 
-void Tev::SetRegColor(int reg, int comp, bool konst, s16 color)
+void Tev::SetRegColor(int reg, int comp, s16 color)
 {
-	if (konst)
-	{
-		KonstantColors[reg][comp] = color;
-	}
-	else
-	{
-		Reg[reg][comp] = color;
-	}
+	KonstantColors[reg][comp] = color;
 }
 
-void Tev::DoState(PointerWrap &p)
-{
-	p.DoArray(Reg, sizeof(Reg));
-
-	p.DoArray(KonstantColors, sizeof(KonstantColors));
-	p.DoArray(TexColor,4);
-	p.DoArray(RasColor,4);
-	p.DoArray(StageKonst,4);
-	p.DoArray(Zero16,4);
-
-	p.DoArray(FixedConstants,9);
-	p.Do(AlphaBump);
-	p.DoArray(IndirectTex, sizeof(IndirectTex));
-	p.Do(TexCoord);
-
-	p.DoArray(m_BiasLUT,4);
-	p.DoArray(m_ScaleLShiftLUT,4);
-	p.DoArray(m_ScaleRShiftLUT,4);
-
-	p.DoArray(Position,3);
-	p.DoArray(Color, sizeof(Color));
-	p.DoArray(Uv, 8);
-	p.DoArray(IndirectLod,4);
-	p.DoArray(IndirectLinear,4);
-	p.DoArray(TextureLod,16);
-	p.DoArray(TextureLinear,16);
-}

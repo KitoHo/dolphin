@@ -1,18 +1,33 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
+#include "Common/MsgHandler.h"
+#include "Common/Logging/Log.h"
 #include "DiscIO/Blob.h"
 #include "DiscIO/DriveBlob.h"
 
 #ifdef _WIN32
 #include "Common/StringUtil.h"
+#else
+#include <sys/ioctl.h>
+#include <stdio.h>      // fileno
+#if defined __linux__
+#include <linux/fs.h>   // BLKGETSIZE64
+#elif defined __FreeBSD__
+#include <sys/disk.h>   // DIOCGMEDIASIZE
+#elif defined __APPLE__
+#include <sys/disk.h>   // DKIOCGETBLOCKCOUNT / DKIOCGETBLOCKSIZE
+#endif
 #endif
 
 namespace DiscIO
@@ -20,40 +35,67 @@ namespace DiscIO
 
 DriveReader::DriveReader(const std::string& drive)
 {
+	// 32 sectors is roughly the optimal amount a CD Drive can read in
+	// a single IO cycle. Larger values yield no performance improvement
+	// and just cause IO stalls from the read delay. Smaller values allow
+	// the OS IO and seeking overhead to ourstrip the time actually spent
+	// transferring bytes from the media.
+	SetChunkSize(32);    // 32*2048 = 64KiB
+	SetSectorSize(2048);
 #ifdef _WIN32
-	SectorReader::SetSectorSize(2048);
 	auto const path = UTF8ToTStr(std::string("\\\\.\\") + drive);
-	hDisc = CreateFile(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-						nullptr, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
-	if (hDisc != INVALID_HANDLE_VALUE)
+	m_disc_handle = CreateFile(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+	                           nullptr, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
+	if (IsOK())
 	{
 		// Do a test read to make sure everything is OK, since it seems you can get
 		// handles to empty drives.
 		DWORD not_used;
-		u8 *buffer = new u8[m_blocksize];
-		if (!ReadFile(hDisc, buffer, m_blocksize, (LPDWORD)&not_used, nullptr))
+		std::vector<u8> buffer(GetSectorSize());
+		if (!ReadFile(m_disc_handle, buffer.data(), GetSectorSize(), &not_used, nullptr))
 		{
-			delete [] buffer;
 			// OK, something is wrong.
-			CloseHandle(hDisc);
-			hDisc = INVALID_HANDLE_VALUE;
-			return;
+			CloseHandle(m_disc_handle);
+			m_disc_handle = INVALID_HANDLE_VALUE;
 		}
-		delete [] buffer;
+	}
+	if (IsOK())
+	{
+		// Initialize m_size by querying the volume capacity.
+		STORAGE_READ_CAPACITY storage_size;
+		storage_size.Version = sizeof(storage_size);
+		DWORD bytes = 0;
+		DeviceIoControl(m_disc_handle, IOCTL_STORAGE_READ_CAPACITY, nullptr, 0,
+		                &storage_size, sizeof(storage_size), &bytes, nullptr);
+		m_size = bytes ? storage_size.DiskLength.QuadPart : 0;
 
 	#ifdef _LOCKDRIVE // Do we want to lock the drive?
 		// Lock the compact disc in the CD-ROM drive to prevent accidental
 		// removal while reading from it.
-		pmrLockCDROM.PreventMediaRemoval = TRUE;
-		DeviceIoControl(hDisc, IOCTL_CDROM_MEDIA_REMOVAL,
-					&pmrLockCDROM, sizeof(pmrLockCDROM), nullptr,
-					0, &dwNotUsed, nullptr);
+		m_lock_cdrom.PreventMediaRemoval = TRUE;
+		DeviceIoControl(m_disc_handle, IOCTL_CDROM_MEDIA_REMOVAL,
+		                &m_lock_cdrom, sizeof(m_lock_cdrom), nullptr,
+		                0, &dwNotUsed, nullptr);
 	#endif
 #else
-	SectorReader::SetSectorSize(2048);
-	file_.Open(drive, "rb");
-	if (file_)
+	m_file.Open(drive, "rb");
+	if (m_file)
 	{
+		int fd = fileno(m_file.GetHandle());
+#if defined __linux__
+		// NOTE: Doesn't matter if it fails, m_size was initialized to zero
+		ioctl(fd, BLKGETSIZE64, &m_size); // u64*
+#elif defined __FreeBSD__
+		off_t size = 0;
+		ioctl(fd, DIOCGMEDIASIZE, &size); // off_t*
+		m_size = size;
+#elif defined __APPLE__
+		u64 count = 0;
+		u32 block_size = 0;
+		ioctl(fd, DKIOCGETBLOCKCOUNT, &count); // u64*
+		ioctl(fd, DKIOCGETBLOCKSIZE,  &block_size); // u32*
+		m_size = count * block_size;
+#endif
 #endif
 	}
 	else
@@ -67,72 +109,57 @@ DriveReader::~DriveReader()
 #ifdef _WIN32
 #ifdef _LOCKDRIVE // Do we want to lock the drive?
 	// Unlock the disc in the CD-ROM drive.
-	pmrLockCDROM.PreventMediaRemoval = FALSE;
-	DeviceIoControl (hDisc, IOCTL_CDROM_MEDIA_REMOVAL,
-		&pmrLockCDROM, sizeof(pmrLockCDROM), nullptr,
+	m_lock_cdrom.PreventMediaRemoval = FALSE;
+	DeviceIoControl (m_disc_handle, IOCTL_CDROM_MEDIA_REMOVAL,
+		&m_lock_cdrom, sizeof(m_lock_cdrom), nullptr,
 		0, &dwNotUsed, nullptr);
 #endif
-	if (hDisc != INVALID_HANDLE_VALUE)
+	if (m_disc_handle != INVALID_HANDLE_VALUE)
 	{
-		CloseHandle(hDisc);
-		hDisc = INVALID_HANDLE_VALUE;
+		CloseHandle(m_disc_handle);
+		m_disc_handle = INVALID_HANDLE_VALUE;
 	}
 #else
-	file_.Close();
+	m_file.Close();
 #endif
 }
 
-DriveReader* DriveReader::Create(const std::string& drive)
+std::unique_ptr<DriveReader> DriveReader::Create(const std::string& drive)
 {
-	DriveReader* reader = new DriveReader(drive);
+	auto reader = std::unique_ptr<DriveReader>(new DriveReader(drive));
 
 	if (!reader->IsOK())
-	{
-		delete reader;
-		return nullptr;
-	}
+		reader.reset();
 
 	return reader;
 }
 
-void DriveReader::GetBlock(u64 block_num, u8* out_ptr)
+bool DriveReader::GetBlock(u64 block_num, u8* out_ptr)
 {
-	u8* const lpSector = new u8[m_blocksize];
-#ifdef _WIN32
-	u32 NotUsed;
-	u64 offset = m_blocksize * block_num;
-	LONG off_low = (LONG)offset & 0xFFFFFFFF;
-	LONG off_high = (LONG)(offset >> 32);
-	SetFilePointer(hDisc, off_low, &off_high, FILE_BEGIN);
-	if (!ReadFile(hDisc, lpSector, m_blocksize, (LPDWORD)&NotUsed, nullptr))
-		PanicAlertT("Disc Read Error");
-#else
-	file_.Seek(m_blocksize * block_num, SEEK_SET);
-	file_.ReadBytes(lpSector, m_blocksize);
-#endif
-	memcpy(out_ptr, lpSector, m_blocksize);
-	delete[] lpSector;
+	return DriveReader::ReadMultipleAlignedBlocks(block_num, 1, out_ptr);
 }
 
 bool DriveReader::ReadMultipleAlignedBlocks(u64 block_num, u64 num_blocks, u8* out_ptr)
 {
 #ifdef _WIN32
-	u32 NotUsed;
-	u64 offset = m_blocksize * block_num;
-	LONG off_low = (LONG)offset & 0xFFFFFFFF;
-	LONG off_high = (LONG)(offset >> 32);
-	SetFilePointer(hDisc, off_low, &off_high, FILE_BEGIN);
-	if (!ReadFile(hDisc, out_ptr, (DWORD)(m_blocksize * num_blocks), (LPDWORD)&NotUsed, nullptr))
+	LARGE_INTEGER offset;
+	offset.QuadPart = GetSectorSize() * block_num;
+	SetFilePointerEx(m_disc_handle, offset, nullptr, FILE_BEGIN);
+	DWORD bytes_read;
+	if (!ReadFile(m_disc_handle, out_ptr, static_cast<DWORD>(GetSectorSize() * num_blocks),
+	              &bytes_read, nullptr))
 	{
 		PanicAlertT("Disc Read Error");
 		return false;
 	}
+	return bytes_read == GetSectorSize() * num_blocks;
 #else
-	fseeko(file_.GetHandle(), m_blocksize*block_num, SEEK_SET);
-	if (fread(out_ptr, 1, m_blocksize * num_blocks, file_.GetHandle()) != m_blocksize * num_blocks)
-		return false;
+	m_file.Seek(GetSectorSize() * block_num, SEEK_SET);
+	if (m_file.ReadBytes(out_ptr, num_blocks * GetSectorSize()))
+		return true;
+	m_file.Clear();
+	return false;
 #endif
-	return true;
 }
 
 }  // namespace

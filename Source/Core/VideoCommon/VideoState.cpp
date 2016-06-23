@@ -1,12 +1,16 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include <cstring>
+
 #include "Common/ChunkFile.h"
+#include "VideoCommon/BoundingBox.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/Fifo.h"
+#include "VideoCommon/GeometryShaderManager.h"
 #include "VideoCommon/PixelEngine.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/TextureDecoder.h"
@@ -15,31 +19,25 @@
 #include "VideoCommon/VideoState.h"
 #include "VideoCommon/XFMemory.h"
 
-static void DoState(PointerWrap &p)
+void VideoCommon_DoState(PointerWrap &p)
 {
 	// BP Memory
 	p.Do(bpmem);
 	p.DoMarker("BP Memory");
 
 	// CP Memory
-	p.DoArray(arraybases, 16);
-	p.DoArray(arraystrides, 16);
-	p.Do(MatrixIndexA);
-	p.Do(MatrixIndexB);
-	p.Do(g_VtxDesc.Hex);
-	p.DoArray(g_VtxAttr, 8);
-	p.DoMarker("CP Memory");
+	DoCPState(p);
 
 	// XF Memory
 	p.Do(xfmem);
 	p.DoMarker("XF Memory");
 
 	// Texture decoder
-	p.DoArray(texMem, TMEM_SIZE);
+	p.DoArray(texMem);
 	p.DoMarker("texMem");
 
 	// FIFO
-	Fifo_DoState(p);
+	Fifo::DoState(p);
 	p.DoMarker("Fifo");
 
 	CommandProcessor::DoState(p);
@@ -55,29 +53,22 @@ static void DoState(PointerWrap &p)
 	VertexShaderManager::DoState(p);
 	p.DoMarker("VertexShaderManager");
 
-	VertexManager::DoState(p);
+	GeometryShaderManager::DoState(p);
+	p.DoMarker("GeometryShaderManager");
+
+	VertexManagerBase::DoState(p);
 	p.DoMarker("VertexManager");
+
+	BoundingBox::DoState(p);
+	p.DoMarker("BoundingBox");
+
 
 	// TODO: search for more data that should be saved and add it here
 }
 
-void VideoCommon_DoState(PointerWrap &p)
-{
-	DoState(p);
-}
-
-void VideoCommon_RunLoop(bool enable)
-{
-	EmulatorState(enable);
-}
-
 void VideoCommon_Init()
 {
-	memset(arraybases, 0, sizeof(arraybases));
-	memset(arraystrides, 0, sizeof(arraystrides));
-	memset(&MatrixIndexA, 0, sizeof(MatrixIndexA));
-	memset(&MatrixIndexB, 0, sizeof(MatrixIndexB));
-	memset(&g_VtxDesc, 0, sizeof(g_VtxDesc));
-	memset(g_VtxAttr, 0, sizeof(g_VtxAttr));
+	memset(&g_main_cp_state, 0, sizeof(g_main_cp_state));
+	memset(&g_preprocess_cp_state, 0, sizeof(g_preprocess_cp_state));
 	memset(texMem, 0, TMEM_SIZE);
 }

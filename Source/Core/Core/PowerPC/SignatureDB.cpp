@@ -1,14 +1,13 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #include <string>
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
-
-#include "Core/HW/Memmap.h"
-
+#include "Common/Logging/Log.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/PPCAnalyst.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/SignatureDB.h"
@@ -77,7 +76,7 @@ bool SignatureDB::Save(const std::string& filename)
 //Adds a known function to the hash database
 u32 SignatureDB::Add(u32 startAddr, u32 size, const std::string& name)
 {
-	u32 hash = ComputeCodeChecksum(startAddr, startAddr + size);
+	u32 hash = ComputeCodeChecksum(startAddr, startAddr + size - 4);
 
 	DBFunc temp_dbfunc;
 	temp_dbfunc.size = size;
@@ -96,8 +95,7 @@ void SignatureDB::List()
 	{
 		INFO_LOG(OSHLE, "%s : %i bytes, hash = %08x", entry.second.name.c_str(), entry.second.size, entry.first);
 	}
-	INFO_LOG(OSHLE, "%lu functions known in current database.",
-		(unsigned long)database.size());
+	INFO_LOG(OSHLE, "%zu functions known in current database.", database.size());
 }
 
 void SignatureDB::Clear()
@@ -134,7 +132,8 @@ void SignatureDB::Initialize(PPCSymbolDB *symbol_db, const std::string& prefix)
 {
 	for (const auto& symbol : symbol_db->Symbols())
 	{
-		if ((symbol.second.name.substr(0, prefix.size()) == prefix) || prefix.empty())
+		if ((prefix.empty() && (!symbol.second.name.empty()) && symbol.second.name.substr(0, 3) != "zz_" && symbol.second.name.substr(0, 1) != ".") ||
+			((!prefix.empty()) && symbol.second.name.substr(0, prefix.size()) == prefix))
 		{
 			DBFunc temp_dbfunc;
 			temp_dbfunc.name = symbol.second.name;
@@ -149,7 +148,7 @@ void SignatureDB::Initialize(PPCSymbolDB *symbol_db, const std::string& prefix)
 	u32 sum = 0;
 	for (u32 offset = offsetStart; offset <= offsetEnd; offset += 4)
 	{
-		u32 opcode = Memory::Read_Instruction(offset);
+		u32 opcode = PowerPC::HostRead_Instruction(offset);
 		u32 op = opcode & 0xFC000000;
 		u32 op2 = 0;
 		u32 op3 = 0;

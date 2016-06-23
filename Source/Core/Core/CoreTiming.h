@@ -1,5 +1,5 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #pragma once
@@ -18,18 +18,26 @@
 //   ScheduleEvent(periodInCycles - cyclesLate, callback, "whatever")
 
 #include <string>
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 
 class PointerWrap;
 
 namespace CoreTiming
 {
 
+// These really shouldn't be global, but jit64 accesses them directly
+extern s64 g_globalTimer;
+extern u64 g_fakeTBStartValue;
+extern u64 g_fakeTBStartTicks;
+extern int g_slicelength;
+extern float g_lastOCFactor_inverted;
+
 void Init();
 void Shutdown();
 
-typedef void (*TimedCallback)(u64 userdata, int cyclesLate);
+typedef void (*TimedCallback)(u64 userdata, s64 cyclesLate);
 
+// This should only be called from the CPU thread, if you are calling it any other thread, you are doing something evil
 u64 GetTicks();
 u64 GetIdleTicks();
 
@@ -39,16 +47,16 @@ void DoState(PointerWrap &p);
 int RegisterEvent(const std::string& name, TimedCallback callback);
 void UnregisterAllEvents();
 
-// userdata MAY NOT CONTAIN POINTERS. userdata might get written and reloaded from disk,
-// when we implement state saves.
-void ScheduleEvent(int cyclesIntoFuture, int event_type, u64 userdata=0);
-void ScheduleEvent_Threadsafe(int cyclesIntoFuture, int event_type, u64 userdata=0);
-void ScheduleEvent_Threadsafe_Immediate(int event_type, u64 userdata=0);
+// userdata MAY NOT CONTAIN POINTERS. userdata might get written and reloaded from savestates.
+void ScheduleEvent(s64 cyclesIntoFuture, int event_type, u64 userdata = 0);
+void ScheduleEvent_Immediate(int event_type, u64 userdata = 0);
+void ScheduleEvent_Threadsafe(s64 cyclesIntoFuture, int event_type, u64 userdata = 0);
+void ScheduleEvent_Threadsafe_Immediate(int event_type, u64 userdata = 0);
+void ScheduleEvent_AnyThread(s64 cyclesIntoFuture, int event_type, u64 userdata = 0);
 
 // We only permit one event of each type in the queue at a time.
 void RemoveEvent(int event_type);
 void RemoveAllEvents(int event_type);
-bool IsScheduled(int event_type);
 void Advance();
 void MoveEvents();
 void ProcessFifoWaitEvents();
@@ -60,10 +68,6 @@ void Idle();
 void ClearPendingEvents();
 
 void LogPendingEvents();
-void SetMaximumSlice(int maximumSliceLength);
-void ResetSliceLength();
-
-void RegisterAdvanceCallback(void (*callback)(int cyclesExecuted));
 
 std::string GetScheduledEventsSummary();
 
@@ -76,8 +80,8 @@ void SetFakeTBStartValue(u64 val);
 u64 GetFakeTBStartTicks();
 void SetFakeTBStartTicks(u64 val);
 
-void ForceExceptionCheck(int cycles);
+void ForceExceptionCheck(s64 cycles);
 
-extern int slicelength;
 
-}; // end of namespace
+
+} // end of namespace

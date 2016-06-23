@@ -1,20 +1,16 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2010 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #include <string>
 
 #include "Common/FileUtil.h"
-#include "Common/IniFile.h"
+#include "Common/StringUtil.h"
+#include "Common/Thread.h"
 
+#include "VideoCommon/BPMemory.h"
 #include "VideoCommon/Debugger.h"
-#include "VideoCommon/NativeVertexFormat.h"
-#include "VideoCommon/PixelShaderGen.h"
-#include "VideoCommon/TextureCacheBase.h"
-#include "VideoCommon/VertexShaderGen.h"
 #include "VideoCommon/VideoConfig.h"
-
-//void UpdateFPSDisplay(const char *text);
 
 GFXDebuggerBase *g_pdebugger = nullptr;
 volatile bool GFXDebuggerPauseFlag = false; // if true, the GFX thread will be spin locked until it's false again
@@ -57,10 +53,8 @@ void GFXDebuggerCheckAndPause(bool update)
 		g_pdebugger->OnPause();
 		while ( GFXDebuggerPauseFlag )
 		{
-			g_video_backend->UpdateFPSDisplay("Paused by Video Debugger");
-
 			if (update) GFXDebuggerUpdateScreen();
-			SLEEP(5);
+			Common::SleepCurrentThread(5);
 		}
 		g_pdebugger->OnContinue();
 	}
@@ -85,7 +79,7 @@ void GFXDebuggerBase::DumpPixelShader(const std::string& path)
 	const std::string filename = StringFromFormat("%sdump_ps.txt", path.c_str());
 
 	std::string output;
-	bool useDstAlpha = !g_ActiveConfig.bDstAlphaPass && bpmem.dstalpha.enable && bpmem.blendmode.alphaupdate && bpmem.zcontrol.pixel_format == PEControl::RGBA6_Z24;
+	bool useDstAlpha = bpmem.dstalpha.enable && bpmem.blendmode.alphaupdate && bpmem.zcontrol.pixel_format == PEControl::RGBA6_Z24;
 	if (!useDstAlpha)
 	{
 		output = "Destination alpha disabled:\n";

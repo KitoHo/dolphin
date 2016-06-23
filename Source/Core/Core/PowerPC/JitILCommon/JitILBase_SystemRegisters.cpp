@@ -1,9 +1,10 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
-#include "Common/Common.h"
-#include "Core/HW/SystemTimers.h"
+#include "Common/CommonTypes.h"
+#include "Common/MsgHandler.h"
+#include "Core/ConfigManager.h"
 #include "Core/PowerPC/JitILCommon/JitILBase.h"
 
 void JitILBase::mtspr(UGeckoInstruction inst)
@@ -170,42 +171,35 @@ void JitILBase::crXX(UGeckoInstruction inst)
 
 	// Compute combined bit
 	const unsigned subop = inst.SUBOP10;
-	switch (subop) {
-		case 257:
-			// crand
+	switch (subop)
+	{
+		case 257: // crand
 			eax = ibuild.EmitAnd(eax, ecx);
 			break;
-		case 129:
-			// crandc
+		case 129: // crandc
 			ecx = ibuild.EmitNot(ecx);
 			eax = ibuild.EmitAnd(eax, ecx);
 			break;
-		case 289:
-			// creqv
+		case 289: // creqv
 			eax = ibuild.EmitXor(eax, ecx);
 			eax = ibuild.EmitNot(eax);
 			break;
-		case 225:
-			// crnand
+		case 225: // crnand
 			eax = ibuild.EmitAnd(eax, ecx);
 			eax = ibuild.EmitNot(eax);
 			break;
-		case 33:
-			// crnor
+		case 33:  // crnor
 			eax = ibuild.EmitOr(eax, ecx);
 			eax = ibuild.EmitNot(eax);
 			break;
-		case 449:
-			// cror
+		case 449: // cror
 			eax = ibuild.EmitOr(eax, ecx);
 			break;
-		case 417:
-			// crorc
+		case 417: // crorc
 			ecx = ibuild.EmitNot(ecx);
 			eax = ibuild.EmitOr(eax, ecx);
 			break;
-		case 193:
-			// crxor
+		case 193: // crxor
 			eax = ibuild.EmitXor(eax, ecx);
 			break;
 		default:

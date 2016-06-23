@@ -1,38 +1,24 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2009 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <cstring>
 
-#include "Common/Common.h"
-#include "VideoBackends/Software/BPMemLoader.h"
+#include "Common/CommonTypes.h"
 #include "VideoBackends/Software/EfbInterface.h"
-#include "VideoBackends/Software/HwRasterizer.h"
 #include "VideoBackends/Software/NativeVertexFormat.h"
 #include "VideoBackends/Software/Rasterizer.h"
-#include "VideoBackends/Software/SWStatistics.h"
-#include "VideoBackends/Software/SWVideoConfig.h"
 #include "VideoBackends/Software/Tev.h"
-#include "VideoBackends/Software/XFMemLoader.h"
-
-
-#define BLOCK_SIZE 2
-
-#define CLAMP(x, a, b) (x>b)?b:(x<a)?a:x
-
-// returns approximation of log2(f) in s28.4
-// results are close enough to use for LOD
-static inline s32 FixedLog2(float f)
-{
-	u32 *x = (u32*)&f;
-	s32 logInt = ((*x & 0x7F800000) >> 19) - 2032; // integer part
-	s32 logFract = (*x & 0x007fffff) >> 19; // approximate fractional part
-
-	return logInt + logFract;
-}
+#include "VideoCommon/PerfQueryBase.h"
+#include "VideoCommon/Statistics.h"
+#include "VideoCommon/VideoConfig.h"
+#include "VideoCommon/XFMemory.h"
 
 namespace Rasterizer
 {
+static constexpr int BLOCK_SIZE = 2;
+
 static Slope ZSlope;
 static Slope WSlope;
 static Slope ColorSlopes[2][4];
@@ -43,35 +29,8 @@ static s32 vertex0Y;
 static float vertexOffsetX;
 static float vertexOffsetY;
 
-static s32 scissorLeft = 0;
-static s32 scissorTop = 0;
-static s32 scissorRight = 0;
-static s32 scissorBottom = 0;
-
 static Tev tev;
 static RasterBlock rasterBlock;
-
-void DoState(PointerWrap &p)
-{
-	ZSlope.DoState(p);
-	WSlope.DoState(p);
-	for (auto& color_slopes_1d : ColorSlopes)
-		for (Slope& color_slope : color_slopes_1d)
-			color_slope.DoState(p);
-	for (auto& tex_slopes_1d : TexSlopes)
-		for (Slope& tex_slope : tex_slopes_1d)
-			tex_slope.DoState(p);
-	p.Do(vertex0X);
-	p.Do(vertex0Y);
-	p.Do(vertexOffsetX);
-	p.Do(vertexOffsetY);
-	p.Do(scissorLeft);
-	p.Do(scissorTop);
-	p.Do(scissorRight);
-	p.Do(scissorBottom);
-	tev.DoState(p);
-	p.Do(rasterBlock);
-}
 
 void Init()
 {
@@ -83,6 +42,19 @@ void Init()
 	ZSlope.f0 = 1.f;
 }
 
+// Returns approximation of log2(f) in s28.4
+// results are close enough to use for LOD
+static s32 FixedLog2(float f)
+{
+	u32 x;
+	std::memcpy(&x, &f, sizeof(u32));
+
+	s32 logInt = ((x & 0x7F800000) >> 19) - 2032; // integer part
+	s32 logFract = (x & 0x007fffff) >> 19; // approximate fractional part
+
+	return logInt + logFract;
+}
+
 static inline int iround(float x)
 {
 	int t = (int)x;
@@ -92,45 +64,21 @@ static inline int iround(float x)
 	return t;
 }
 
-void SetScissor()
+void SetTevReg(int reg, int comp, s16 color)
 {
-	int xoff = bpmem.scissorOffset.x * 2 - 342;
-	int yoff = bpmem.scissorOffset.y * 2 - 342;
-
-	scissorLeft = bpmem.scissorTL.x - xoff - 342;
-	if (scissorLeft < 0)
-		scissorLeft = 0;
-
-	scissorTop = bpmem.scissorTL.y - yoff - 342;
-	if (scissorTop < 0)
-		scissorTop = 0;
-
-	scissorRight = bpmem.scissorBR.x - xoff - 341;
-	if (scissorRight > EFB_WIDTH)
-		scissorRight = EFB_WIDTH;
-
-	scissorBottom = bpmem.scissorBR.y - yoff - 341;
-	if (scissorBottom > EFB_HEIGHT)
-		scissorBottom = EFB_HEIGHT;
+	tev.SetRegColor(reg, comp, color);
 }
 
-void SetTevReg(int reg, int comp, bool konst, s16 color)
+static void Draw(s32 x, s32 y, s32 xi, s32 yi)
 {
-	tev.SetRegColor(reg, comp, konst, color);
-}
-
-inline void Draw(s32 x, s32 y, s32 xi, s32 yi)
-{
-	INCSTAT(swstats.thisFrame.rasterizedPixels);
+	INCSTAT(stats.thisFrame.rasterizedPixels);
 
 	float dx = vertexOffsetX + (float)(x - vertex0X);
 	float dy = vertexOffsetY + (float)(y - vertex0Y);
 
-	s32 z = (s32)ZSlope.GetValue(dx, dy);
-	if (z < 0 || z > 0x00ffffff)
-		return;
+	s32 z = (s32)MathUtil::Clamp<float>(ZSlope.GetValue(dx, dy), 0.0f, 16777215.0f);
 
-	if (bpmem.UseEarlyDepthTest() && g_SWVideoConfig.bZComploc)
+	if (bpmem.UseEarlyDepthTest() && g_ActiveConfig.bZComploc)
 	{
 		// TODO: Test if perf regs are incremented even if test is disabled
 		EfbInterface::IncPerfCounterQuadCount(PQ_ZCOMP_INPUT_ZCOMPLOC);
@@ -210,15 +158,15 @@ static void InitSlope(Slope *slope, float f1, float f2, float f3, float DX31, fl
 	slope->f0 = f1;
 }
 
-static inline void CalculateLOD(s32 &lod, bool &linear, u32 texmap, u32 texcoord)
+static inline void CalculateLOD(s32* lodp, bool* linear, u32 texmap, u32 texcoord)
 {
-	FourTexUnits& texUnit = bpmem.tex[(texmap >> 2) & 1];
-	u8 subTexmap = texmap & 3;
+	const FourTexUnits& texUnit = bpmem.tex[(texmap >> 2) & 1];
+	const u8 subTexmap = texmap & 3;
 
 	// LOD calculation requires data from the texture mode for bias, etc.
 	// it does not seem to use the actual texture size
-	TexMode0& tm0 = texUnit.texMode0[subTexmap];
-	TexMode1& tm1 = texUnit.texMode1[subTexmap];
+	const TexMode0& tm0 = texUnit.texMode0[subTexmap];
+	const TexMode1& tm1 = texUnit.texMode1[subTexmap];
 
 	float sDelta, tDelta;
 	if (tm0.diag_lod)
@@ -240,20 +188,22 @@ static inline void CalculateLOD(s32 &lod, bool &linear, u32 texmap, u32 texcoord
 	}
 
 	// get LOD in s28.4
-	lod = FixedLog2(std::max(sDelta, tDelta));
+	s32 lod = FixedLog2(std::max(sDelta, tDelta));
 
 	// bias is s2.5
 	int bias = tm0.lod_bias;
 	bias >>= 1;
 	lod += bias;
 
-	linear = ((lod > 0 && (tm0.min_filter & 4)) || (lod <= 0 && tm0.mag_filter));
+	*linear = ((lod > 0 && (tm0.min_filter & 4)) || (lod <= 0 && tm0.mag_filter));
 
-	// order of checks matters
-	// should be:
-	// if lod > max then max
-	// else if lod < min then min
-	lod = CLAMP(lod, (s32)tm1.min_lod, (s32)tm1.max_lod);
+	// NOTE: The order of comparisons for this clamp check matters.
+	if (lod > static_cast<s32>(tm1.max_lod))
+		lod = static_cast<s32>(tm1.max_lod);
+	else if (lod < static_cast<s32>(tm1.min_lod))
+		lod = static_cast<s32>(tm1.min_lod);
+
+	*lodp = lod;
 }
 
 static void BuildBlock(s32 blockX, s32 blockY)
@@ -295,32 +245,26 @@ static void BuildBlock(s32 blockX, s32 blockY)
 		u32 texcoord = indref & 3;
 		indref >>= 3;
 
-		CalculateLOD(rasterBlock.IndirectLod[i], rasterBlock.IndirectLinear[i], texmap, texcoord);
+		CalculateLOD(&rasterBlock.IndirectLod[i], &rasterBlock.IndirectLinear[i], texmap, texcoord);
 	}
 
 	for (unsigned int i = 0; i <= bpmem.genMode.numtevstages; i++)
 	{
 		int stageOdd = i&1;
-		TwoTevStageOrders &order = bpmem.tevorders[i >> 1];
+		const TwoTevStageOrders& order = bpmem.tevorders[i >> 1];
 		if (order.getEnable(stageOdd))
 		{
 			u32 texmap = order.getTexMap(stageOdd);
 			u32 texcoord = order.getTexCoord(stageOdd);
 
-			CalculateLOD(rasterBlock.TextureLod[i], rasterBlock.TextureLinear[i], texmap, texcoord);
+			CalculateLOD(&rasterBlock.TextureLod[i], &rasterBlock.TextureLinear[i], texmap, texcoord);
 		}
 	}
 }
 
 void DrawTriangleFrontFace(OutputVertexData *v0, OutputVertexData *v1, OutputVertexData *v2)
 {
-	INCSTAT(swstats.thisFrame.numTrianglesDrawn);
-
-	if (g_SWVideoConfig.bHwRasterizer)
-	{
-		HwRasterizer::DrawTriangleFrontFace(v0, v1, v2);
-		return;
-	}
+	INCSTAT(stats.thisFrame.numTrianglesDrawn);
 
 	// adapted from http://devmaster.net/posts/6145/advanced-rasterization
 
@@ -344,13 +288,13 @@ void DrawTriangleFrontFace(OutputVertexData *v0, OutputVertexData *v1, OutputVer
 	const s32 DY31 = Y3 - Y1;
 
 	// Fixed-pos32 deltas
-	const s32 FDX12 = DX12 << 4;
-	const s32 FDX23 = DX23 << 4;
-	const s32 FDX31 = DX31 << 4;
+	const s32 FDX12 = DX12 * 16;
+	const s32 FDX23 = DX23 * 16;
+	const s32 FDX31 = DX31 * 16;
 
-	const s32 FDY12 = DY12 << 4;
-	const s32 FDY23 = DY23 << 4;
-	const s32 FDY31 = DY31 << 4;
+	const s32 FDY12 = DY12 * 16;
+	const s32 FDY23 = DY23 * 16;
+	const s32 FDY31 = DY31 * 16;
 
 	// Bounding rectangle
 	s32 minx = (std::min(std::min(X1, X2), X3) + 0xF) >> 4;
@@ -359,6 +303,25 @@ void DrawTriangleFrontFace(OutputVertexData *v0, OutputVertexData *v1, OutputVer
 	s32 maxy = (std::max(std::max(Y1, Y2), Y3) + 0xF) >> 4;
 
 	// scissor
+	int xoff = bpmem.scissorOffset.x * 2 - 342;
+	int yoff = bpmem.scissorOffset.y * 2 - 342;
+
+	s32 scissorLeft = bpmem.scissorTL.x - xoff - 342;
+	if (scissorLeft < 0)
+		scissorLeft = 0;
+
+	s32 scissorTop = bpmem.scissorTL.y - yoff - 342;
+	if (scissorTop < 0)
+		scissorTop = 0;
+
+	s32 scissorRight = bpmem.scissorBR.x - xoff - 341;
+	if (scissorRight > EFB_WIDTH)
+		scissorRight = EFB_WIDTH;
+
+	s32 scissorBottom = bpmem.scissorBR.y - yoff - 341;
+	if (scissorBottom > EFB_HEIGHT)
+		scissorBottom = EFB_HEIGHT;
+
 	minx = std::max(minx, scissorLeft);
 	maxx = std::min(maxx, scissorRight);
 	miny = std::max(miny, scissorTop);
@@ -384,7 +347,7 @@ void DrawTriangleFrontFace(OutputVertexData *v0, OutputVertexData *v1, OutputVer
 	// Many things might prevent us from reaching this line (culling, clipping, scissoring).
 	// However, the zslope is always guaranteed to be calculated unless all vertices are trivially rejected during clipping!
 	// We're currently sloppy at this since we abort early if any of the culling/clipping/scissoring tests fail.
-	if (!bpmem.genMode.zfreeze || !g_SWVideoConfig.bZFreeze)
+	if (!bpmem.genMode.zfreeze || !g_ActiveConfig.bZFreeze)
 		InitSlope(&ZSlope, v0->screenPosition[2], v1->screenPosition[2], v2->screenPosition[2], fltdx31, fltdx12, fltdy12, fltdy31);
 
 	for (unsigned int i = 0; i < bpmem.genMode.numcolchans; i++)
@@ -399,10 +362,6 @@ void DrawTriangleFrontFace(OutputVertexData *v0, OutputVertexData *v1, OutputVer
 			InitSlope(&TexSlopes[i][comp], v0->texCoords[i][comp] * w[0], v1->texCoords[i][comp] * w[1], v2->texCoords[i][comp] * w[2], fltdx31, fltdx12, fltdy12, fltdy31);
 	}
 
-	// Start in corner of 8x8 block
-	minx &= ~(BLOCK_SIZE - 1);
-	miny &= ~(BLOCK_SIZE - 1);
-
 	// Half-edge constants
 	s32 C1 = DY12 * X1 - DX12 * Y1;
 	s32 C2 = DY23 * X2 - DX23 * Y2;
@@ -412,6 +371,10 @@ void DrawTriangleFrontFace(OutputVertexData *v0, OutputVertexData *v1, OutputVer
 	if (DY12 < 0 || (DY12 == 0 && DX12 > 0)) C1++;
 	if (DY23 < 0 || (DY23 == 0 && DX23 > 0)) C2++;
 	if (DY31 < 0 || (DY31 == 0 && DX31 > 0)) C3++;
+
+	// Start in corner of 8x8 block
+	minx &= ~(BLOCK_SIZE - 1);
+	miny &= ~(BLOCK_SIZE - 1);
 
 	// Loop through blocks
 	for (s32 y = miny; y < maxy; y += BLOCK_SIZE)

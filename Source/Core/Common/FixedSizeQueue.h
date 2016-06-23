@@ -1,5 +1,5 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #pragma once
@@ -16,13 +16,13 @@
 template <class T, int N>
 class FixedSizeQueue
 {
-	T *storage;
+	T* storage;
 	int head;
 	int tail;
 	int count;  // sacrifice 4 bytes for a simpler implementation. may optimize away in the future.
 
 	// Make copy constructor private for now.
-	FixedSizeQueue(FixedSizeQueue &other) {}
+	FixedSizeQueue(FixedSizeQueue& other) {}
 
 public:
 	FixedSizeQueue()
@@ -33,16 +33,18 @@ public:
 
 	~FixedSizeQueue()
 	{
-		delete [] storage;
+		delete[] storage;
 	}
 
-	void clear() {
+	void clear()
+	{
 		head = 0;
 		tail = 0;
 		count = 0;
 	}
 
-	void push(T t) {
+	void push(T t)
+	{
 		storage[tail] = t;
 		tail++;
 		if (tail == N)
@@ -50,23 +52,26 @@ public:
 		count++;
 	}
 
-	void pop() {
+	void pop()
+	{
 		head++;
 		if (head == N)
 			head = 0;
 		count--;
 	}
 
-	T pop_front() {
-		const T &temp = storage[head];
+	T pop_front()
+	{
+		const T& temp = storage[head];
 		pop();
 		return temp;
 	}
 
-	T &front() { return storage[head]; }
-	const T &front() const { return storage[head]; }
+	T& front() { return storage[head]; }
+	const T& front() const { return storage[head]; }
 
-	size_t size() const {
+	size_t size() const
+	{
 		return count;
 	}
 };

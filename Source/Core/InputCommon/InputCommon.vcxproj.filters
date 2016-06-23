@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="ControllerInterface">
@@ -16,6 +16,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ControllerEmu.cpp" />
+    <ClCompile Include="GCAdapter.cpp" />
     <ClCompile Include="InputConfig.cpp" />
     <ClCompile Include="ControllerInterface\DInput\DInput.cpp">
       <Filter>ControllerInterface\DInput</Filter>
@@ -38,13 +39,16 @@
     <ClCompile Include="ControllerInterface\ExpressionParser.cpp">
       <Filter>ControllerInterface</Filter>
     </ClCompile>
-    <ClCompile Include="stdafx.cpp" />
     <ClCompile Include="ControllerInterface\ForceFeedback\ForceFeedbackDevice.cpp">
       <Filter>ControllerInterface\ForceFeedback</Filter>
+    </ClCompile>
+    <ClCompile Include="ControllerInterface\DInput\XInputFilter.cpp">
+      <Filter>ControllerInterface\DInput</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ControllerEmu.h" />
+    <ClCompile Include="GCAdapter.h" />
     <ClInclude Include="GCPadStatus.h" />
     <ClInclude Include="InputConfig.h" />
     <ClInclude Include="ControllerInterface\DInput\DInput.h">
@@ -68,9 +72,14 @@
     <ClInclude Include="ControllerInterface\ExpressionParser.h">
       <Filter>ControllerInterface</Filter>
     </ClInclude>
-    <ClInclude Include="stdafx.h" />
     <ClInclude Include="ControllerInterface\ForceFeedback\ForceFeedbackDevice.h">
       <Filter>ControllerInterface\ForceFeedback</Filter>
+    </ClInclude>
+    <ClInclude Include="ControllerInterface\DInput\DInput8.h">
+      <Filter>ControllerInterface\DInput</Filter>
+    </ClInclude>
+    <ClInclude Include="ControllerInterface\DInput\XInputFilter.h">
+      <Filter>ControllerInterface\DInput</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -1,5 +1,5 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 // See CPP file for comments.
@@ -20,8 +20,6 @@ void DoState(PointerWrap &p);
 bool IsPlaying();
 
 void RegisterMMIO(MMIO::Mapping* mmio, u32 base);
-
-void Update(u64 userdata, int cyclesLate);
 
 // Get the audio rates (48000 or 32000 only)
 unsigned int GetAIDSampleRate();

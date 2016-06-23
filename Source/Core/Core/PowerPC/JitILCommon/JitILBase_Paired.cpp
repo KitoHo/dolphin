@@ -1,8 +1,10 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
-#include "Common/Common.h"
+#include "Common/Assert.h"
+#include "Common/CommonTypes.h"
+#include "Core/ConfigManager.h"
 #include "Core/PowerPC/JitILCommon/JitILBase.h"
 
 void JitILBase::ps_arith(UGeckoInstruction inst)
@@ -129,7 +131,8 @@ void JitILBase::ps_maddXX(UGeckoInstruction inst)
 
 	switch (inst.SUBOP5)
 	{
-	case 14: {//madds0
+	case 14: // madds0
+	{
 		op2 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FC));
 		op2 = ibuild.EmitFPDup0(op2);
 		val = ibuild.EmitFPMul(val, op2);
@@ -137,7 +140,8 @@ void JitILBase::ps_maddXX(UGeckoInstruction inst)
 		val = ibuild.EmitFPAdd(val, op3);
 		break;
 	}
-	case 15: {//madds1
+	case 15: // madds1
+	{
 		op2 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FC));
 		op2 = ibuild.EmitFPDup1(op2);
 		val = ibuild.EmitFPMul(val, op2);
@@ -145,21 +149,24 @@ void JitILBase::ps_maddXX(UGeckoInstruction inst)
 		val = ibuild.EmitFPAdd(val, op3);
 		break;
 	}
-	case 28: {//msub
+	case 28: // msub
+	{
 		op2 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FC));
 		val = ibuild.EmitFPMul(val, op2);
 		op3 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FB));
 		val = ibuild.EmitFPSub(val, op3);
 		break;
 	}
-	case 29: {//madd
+	case 29: // madd
+	{
 		op2 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FC));
 		val = ibuild.EmitFPMul(val, op2);
 		op3 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FB));
 		val = ibuild.EmitFPAdd(val, op3);
 		break;
 	}
-	case 30: {//nmsub
+	case 30: // nmsub
+	{
 		op2 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FC));
 		val = ibuild.EmitFPMul(val, op2);
 		op3 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FB));
@@ -167,7 +174,8 @@ void JitILBase::ps_maddXX(UGeckoInstruction inst)
 		val = ibuild.EmitFPNeg(val);
 		break;
 	}
-	case 31: {//nmadd
+	case 31: // nmadd
+	{
 		op2 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FC));
 		val = ibuild.EmitFPMul(val, op2);
 		op3 = ibuild.EmitCompactMRegToPacked(ibuild.EmitLoadFReg(inst.FB));

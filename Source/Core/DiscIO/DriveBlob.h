@@ -1,9 +1,10 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -20,27 +21,27 @@ namespace DiscIO
 
 class DriveReader : public SectorReader
 {
+public:
+	static std::unique_ptr<DriveReader> Create(const std::string& drive);
+	~DriveReader();
+	BlobType GetBlobType() const override { return BlobType::DRIVE; }
+	u64 GetDataSize() const override { return m_size; }
+	u64 GetRawSize() const override { return m_size; }
+
 private:
 	DriveReader(const std::string& drive);
-	void GetBlock(u64 block_num, u8 *out_ptr) override;
+	bool GetBlock(u64 block_num, u8 *out_ptr) override;
+	bool ReadMultipleAlignedBlocks(u64 block_num, u64 num_blocks, u8* out_ptr) override;
 
 #ifdef _WIN32
-	HANDLE hDisc;
-	PREVENT_MEDIA_REMOVAL pmrLockCDROM;
-	bool IsOK() {return hDisc != INVALID_HANDLE_VALUE;}
+	HANDLE m_disc_handle = INVALID_HANDLE_VALUE;
+	PREVENT_MEDIA_REMOVAL m_lock_cdrom;
+	bool IsOK() const { return m_disc_handle != INVALID_HANDLE_VALUE; }
 #else
-	File::IOFile file_;
-	bool IsOK() {return file_ != nullptr;}
+	File::IOFile m_file;
+	bool IsOK() const { return m_file.IsOpen() && m_file.IsGood(); }
 #endif
-	s64 size;
-
-public:
-	static DriveReader* Create(const std::string& drive);
-	~DriveReader();
-	u64 GetDataSize() const override { return size; }
-	u64 GetRawSize() const override { return size; }
-
-	virtual bool ReadMultipleAlignedBlocks(u64 block_num, u64 num_blocks, u8 *out_ptr) override;
+	u64 m_size = 0;
 };
 
 }  // namespace

@@ -1,12 +1,12 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #include "Common/x64Analyzer.h"
 
-bool DisassembleMov(const unsigned char *codePtr, InstructionInfo *info)
+bool DisassembleMov(const unsigned char* codePtr, InstructionInfo* info)
 {
-	unsigned const char *startCodePtr = codePtr;
+	unsigned const char* startCodePtr = codePtr;
 	u8 rex = 0;
 	u32 opcode;
 	int opcode_length;
@@ -136,6 +136,7 @@ bool DisassembleMov(const unsigned char *codePtr, InstructionInfo *info)
 		info->isMemoryWrite = true;
 		info->hasImmediate = true;
 		info->immediate = *codePtr;
+		info->operandSize = 1;
 		codePtr++;
 		break;
 
@@ -221,4 +222,20 @@ bool DisassembleMov(const unsigned char *codePtr, InstructionInfo *info)
 	}
 	info->instructionSize = (int)(codePtr - startCodePtr);
 	return true;
+}
+
+bool InstructionInfo::operator==(const InstructionInfo& other) const
+{
+	return operandSize     == other.operandSize     &&
+	       instructionSize == other.instructionSize &&
+	       regOperandReg   == other.regOperandReg   &&
+	       otherReg        == other.otherReg        &&
+	       scaledReg       == other.scaledReg       &&
+	       zeroExtend      == other.zeroExtend      &&
+	       signExtend      == other.signExtend      &&
+	       hasImmediate    == other.hasImmediate    &&
+	       isMemoryWrite   == other.isMemoryWrite   &&
+	       byteSwap        == other.byteSwap        &&
+	       immediate       == other.immediate       &&
+	       displacement    == other.displacement;
 }

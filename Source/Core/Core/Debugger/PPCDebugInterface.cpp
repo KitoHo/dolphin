@@ -1,5 +1,5 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #include <string>
@@ -10,7 +10,6 @@
 #include "Core/Host.h"
 #include "Core/Debugger/Debugger_SymbolMap.h"
 #include "Core/Debugger/PPCDebugInterface.h"
-#include "Core/HW/CPU.h"
 #include "Core/HW/DSP.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -19,31 +18,29 @@
 
 std::string PPCDebugInterface::Disassemble(unsigned int address)
 {
-	// Memory::ReadUnchecked_U32 seemed to crash on shutdown
-	if (PowerPC::GetState() == PowerPC::CPU_POWERDOWN)
+	// PowerPC::HostRead_U32 seemed to crash on shutdown
+	if (!IsAlive())
 		return "";
 
-	if (Core::GetState() != Core::CORE_UNINITIALIZED)
+	if (Core::GetState() == Core::CORE_PAUSE)
 	{
-		if (Memory::IsRAMAddress(address, true, true))
-		{
-			u32 op = Memory::Read_Instruction(address);
-			std::string disasm = GekkoDisassembler::Disassemble(op, address);
-
-			UGeckoInstruction inst;
-			inst.hex = Memory::ReadUnchecked_U32(address);
-
-			if (inst.OPCD == 1)
-			{
-				disasm += " (hle)";
-			}
-
-			return disasm;
-		}
-		else
+		if (!PowerPC::HostIsRAMAddress(address))
 		{
 			return "(No RAM here)";
 		}
+
+		u32 op = PowerPC::HostRead_Instruction(address);
+		std::string disasm = GekkoDisassembler::Disassemble(op, address);
+
+		UGeckoInstruction inst;
+		inst.hex = PowerPC::HostRead_U32(address);
+
+		if (inst.OPCD == 1)
+		{
+			disasm += " (hle)";
+		}
+
+		return disasm;
 	}
 	else
 	{
@@ -53,9 +50,9 @@ std::string PPCDebugInterface::Disassemble(unsigned int address)
 
 void PPCDebugInterface::GetRawMemoryString(int memory, unsigned int address, char *dest, int max_size)
 {
-	if (Core::GetState() != Core::CORE_UNINITIALIZED)
+	if (IsAlive())
 	{
-		if (memory || Memory::IsRAMAddress(address, true, true))
+		if (memory || PowerPC::HostIsRAMAddress(address))
 		{
 			snprintf(dest, max_size, "%08X%s", ReadExtraMemory(memory, address), memory ? " (ARAM)" : "");
 		}
@@ -72,7 +69,7 @@ void PPCDebugInterface::GetRawMemoryString(int memory, unsigned int address, cha
 
 unsigned int PPCDebugInterface::ReadMemory(unsigned int address)
 {
-	return Memory::ReadUnchecked_U32(address);
+	return PowerPC::HostRead_U32(address);
 }
 
 unsigned int PPCDebugInterface::ReadExtraMemory(int memory, unsigned int address)
@@ -80,7 +77,7 @@ unsigned int PPCDebugInterface::ReadExtraMemory(int memory, unsigned int address
 	switch (memory)
 	{
 	case 0:
-		return Memory::ReadUnchecked_U32(address);
+		return PowerPC::HostRead_U32(address);
 	case 1:
 		return (DSP::ReadARAM(address)     << 24) |
 		       (DSP::ReadARAM(address + 1) << 16) |
@@ -93,12 +90,12 @@ unsigned int PPCDebugInterface::ReadExtraMemory(int memory, unsigned int address
 
 unsigned int PPCDebugInterface::ReadInstruction(unsigned int address)
 {
-	return Memory::Read_Instruction(address);
+	return PowerPC::HostRead_Instruction(address);
 }
 
 bool PPCDebugInterface::IsAlive()
 {
-	return Core::GetState() != Core::CORE_UNINITIALIZED;
+	return Core::IsRunning();
 }
 
 bool PPCDebugInterface::IsBreakpoint(unsigned int address)
@@ -127,6 +124,11 @@ void PPCDebugInterface::ToggleBreakpoint(unsigned int address)
 		PowerPC::breakpoints.Remove(address);
 	else
 		PowerPC::breakpoints.Add(address);
+}
+
+void PPCDebugInterface::AddWatch(unsigned int address)
+{
+	PowerPC::watches.Add(address);
 }
 
 void PPCDebugInterface::ClearAllMemChecks()
@@ -163,12 +165,7 @@ void PPCDebugInterface::ToggleMemCheck(unsigned int address)
 
 void PPCDebugInterface::InsertBLR(unsigned int address, unsigned int value)
 {
-	Memory::Write_U32(value, address);
-}
-
-void PPCDebugInterface::BreakNow()
-{
-	CCPU::Break();
+	PowerPC::HostWrite_U32(value, address);
 }
 
 
@@ -177,7 +174,9 @@ void PPCDebugInterface::BreakNow()
 // -------------
 int PPCDebugInterface::GetColor(unsigned int address)
 {
-	if (!Memory::IsRAMAddress(address, true, true))
+	if (!IsAlive())
+		return 0xFFFFFF;
+	if (!PowerPC::HostIsRAMAddress(address))
 		return 0xeeeeee;
 	static const int colors[6] =
 	{
@@ -211,11 +210,6 @@ unsigned int PPCDebugInterface::GetPC()
 void PPCDebugInterface::SetPC(unsigned int address)
 {
 	PowerPC::ppcState.pc = address;
-}
-
-void PPCDebugInterface::ShowJitResults(unsigned int address)
-{
-	Host_ShowJitResults(address);
 }
 
 void PPCDebugInterface::RunToBreakpoint()

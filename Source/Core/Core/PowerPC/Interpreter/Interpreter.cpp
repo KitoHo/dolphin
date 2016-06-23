@@ -1,15 +1,23 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include <assert.h>
 #include <cinttypes>
 #include <string>
 
+#include "Common/Assert.h"
+#include "Common/CommonTypes.h"
 #include "Common/GekkoDisassembler.h"
 #include "Common/StringUtil.h"
+#include "Common/Logging/Log.h"
+#include "Core/ConfigManager.h"
+#include "Core/CoreTiming.h"
 #include "Core/Host.h"
 #include "Core/Debugger/Debugger_SymbolMap.h"
-#include "Core/IPC_HLE/WII_IPC_HLE.h"
+#include "Core/HLE/HLE.h"
+#include "Core/HW/CPU.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/PPCTables.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 
@@ -25,12 +33,12 @@ namespace
 bool Interpreter::m_EndBlock;
 
 // function tables
-Interpreter::_interpreterInstruction Interpreter::m_opTable[64];
-Interpreter::_interpreterInstruction Interpreter::m_opTable4[1024];
-Interpreter::_interpreterInstruction Interpreter::m_opTable19[1024];
-Interpreter::_interpreterInstruction Interpreter::m_opTable31[1024];
-Interpreter::_interpreterInstruction Interpreter::m_opTable59[32];
-Interpreter::_interpreterInstruction Interpreter::m_opTable63[1024];
+Interpreter::Instruction Interpreter::m_opTable[64];
+Interpreter::Instruction Interpreter::m_opTable4[1024];
+Interpreter::Instruction Interpreter::m_opTable19[1024];
+Interpreter::Instruction Interpreter::m_opTable31[1024];
+Interpreter::Instruction Interpreter::m_opTable59[32];
+Interpreter::Instruction Interpreter::m_opTable63[1024];
 
 void Interpreter::RunTable4(UGeckoInstruction _inst)  { m_opTable4 [_inst.SUBOP10](_inst); }
 void Interpreter::RunTable19(UGeckoInstruction _inst) { m_opTable19[_inst.SUBOP10](_inst); }
@@ -46,23 +54,6 @@ void Interpreter::Init()
 
 void Interpreter::Shutdown()
 {
-}
-
-static void patches()
-{
-/*	if (Memory::Read_U16(0x90000880) == 0x130b)
-	{
-		PanicAlert("Memory::Read_U16(0x900008800) == 0x130b");
-	}
-*/
-/*	if (PC == 0x80074cd4)
-	{
-		u16 command = Common::swap16(Memory::Read_U16(PowerPC::ppcState.gpr[3] + 8));
-		if (command == 0x0b13)
-		{
-			PanicAlert("command: %x", command);
-		}
-	}*/
 }
 
 static int startTrace = 0;
@@ -82,10 +73,10 @@ static void Trace(UGeckoInstruction& instCode)
 	}
 
 	std::string ppc_inst = GekkoDisassembler::Disassemble(instCode.hex, PC);
-	DEBUG_LOG(POWERPC, "INTER PC: %08x SRR0: %08x SRR1: %08x CRval: %016lx FPSCR: %08x MSR: %08x LR: %08x %s %08x %s", PC, SRR0, SRR1, PowerPC::ppcState.cr_val[0], PowerPC::ppcState.fpscr, PowerPC::ppcState.msr, PowerPC::ppcState.spr[8], regs.c_str(), instCode.hex, ppc_inst.c_str());
+	DEBUG_LOG(POWERPC, "INTER PC: %08x SRR0: %08x SRR1: %08x CRval: %016lx FPSCR: %08x MSR: %08x LR: %08x %s %08x %s", PC, SRR0, SRR1, (unsigned long) PowerPC::ppcState.cr_val[0], PowerPC::ppcState.fpscr, PowerPC::ppcState.msr, PowerPC::ppcState.spr[8], regs.c_str(), instCode.hex, ppc_inst.c_str());
 }
 
-int Interpreter::SingleStepInner(void)
+int Interpreter::SingleStepInner()
 {
 	static UGeckoInstruction instCode;
 	u32 function = HLE::GetFunctionIndex(PC);
@@ -124,7 +115,7 @@ int Interpreter::SingleStepInner(void)
 		#endif
 
 		NPC = PC + sizeof(UGeckoInstruction);
-		instCode.hex = Memory::Read_Opcode(PC);
+		instCode.hex = PowerPC::Read_Opcode(PC);
 
 		// Uncomment to trace the interpreter
 		//if ((PC & 0xffffff)>=0x0ab54c && (PC & 0xffffff)<=0x0ab624)
@@ -163,7 +154,7 @@ int Interpreter::SingleStepInner(void)
 				}
 				else
 				{
-					Common::AtomicOr(PowerPC::ppcState.Exceptions, EXCEPTION_FPU_UNAVAILABLE);
+					PowerPC::ppcState.Exceptions |= EXCEPTION_FPU_UNAVAILABLE;
 					PowerPC::CheckExceptions();
 					m_EndBlock = true;
 				}
@@ -179,15 +170,6 @@ int Interpreter::SingleStepInner(void)
 	last_pc = PC;
 	PC = NPC;
 
-#if defined(_DEBUG) || defined(DEBUGFAST)
-	if (PowerPC::ppcState.gpr[1] == 0)
-	{
-		WARN_LOG(POWERPC, "%i Corrupt stack", PowerPC::ppcState.DebugCount);
-	}
-	PowerPC::ppcState.DebugCount++;
-#endif
-	patches();
-
 	GekkoOPInfo *opinfo = GetOpInfo(instCode);
 	return opinfo->numCycles;
 }
@@ -196,7 +178,7 @@ void Interpreter::SingleStep()
 {
 	SingleStepInner();
 
-	CoreTiming::slicelength = 1;
+	CoreTiming::g_slicelength = 1;
 	PowerPC::ppcState.downcount = 0;
 	CoreTiming::Advance();
 
@@ -218,10 +200,10 @@ int ShowSteps = 300;
 // FastRun - inspired by GCemu (to imitate the JIT so that they can be compared).
 void Interpreter::Run()
 {
-	while (!PowerPC::GetState())
+	while (!CPU::GetState())
 	{
 		//we have to check exceptions at branches apparently (or maybe just rfi?)
-		if (SConfig::GetInstance().m_LocalCoreStartupParameter.bEnableDebugging)
+		if (SConfig::GetInstance().bEnableDebugging)
 		{
 			#ifdef SHOW_HISTORY
 				PCBlockVec.push_back(PC);
@@ -267,7 +249,7 @@ void Interpreter::Run()
 							}
 						#endif
 						INFO_LOG(POWERPC, "Hit Breakpoint - %08x", PC);
-						CCPU::Break();
+						CPU::Break();
 						if (PowerPC::breakpoints.IsTempBreakPoint(PC))
 							PowerPC::breakpoints.Remove(PC);
 
@@ -296,25 +278,22 @@ void Interpreter::Run()
 		}
 
 		CoreTiming::Advance();
-
-		if (PowerPC::ppcState.Exceptions)
-		{
-			PowerPC::CheckExceptions();
-			PC = NPC;
-		}
 	}
 }
 
 void Interpreter::unknown_instruction(UGeckoInstruction _inst)
 {
-	if (_inst.hex != 0)
-	{
-		std::string disasm = GekkoDisassembler::Disassemble(Memory::ReadUnchecked_U32(last_pc), last_pc);
-		NOTICE_LOG(POWERPC, "Last PC = %08x : %s", last_pc, disasm.c_str());
-		Dolphin_Debugger::PrintCallstack();
-		_dbg_assert_msg_(POWERPC, 0, "\nIntCPU: Unknown instruction %08x at PC = %08x  last_PC = %08x  LR = %08x\n", _inst.hex, PC, last_pc, LR);
-	}
-
+	std::string disasm = GekkoDisassembler::Disassemble(PowerPC::HostRead_U32(last_pc), last_pc);
+	NOTICE_LOG(POWERPC, "Last PC = %08x : %s", last_pc, disasm.c_str());
+	Dolphin_Debugger::PrintCallstack();
+	NOTICE_LOG(POWERPC, "\nIntCPU: Unknown instruction %08x at PC = %08x  last_PC = %08x  LR = %08x\n", _inst.hex, PC, last_pc, LR);
+	for (int i = 0; i < 32; i += 4)
+		NOTICE_LOG(POWERPC, "r%d: 0x%08x r%d: 0x%08x r%d:0x%08x r%d: 0x%08x",
+			i, rGPR[i],
+			i + 1, rGPR[i + 1],
+			i + 2, rGPR[i + 2],
+			i + 3, rGPR[i + 3]);
+	_assert_msg_(POWERPC, 0, "\nIntCPU: Unknown instruction %08x at PC = %08x  last_PC = %08x  LR = %08x\n", _inst.hex, PC, last_pc, LR);
 }
 
 void Interpreter::ClearCache()

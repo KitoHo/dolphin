@@ -1,31 +1,52 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
 #pragma once
 
+#include <algorithm>
 #include <cstdlib>
 #include <vector>
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 
 namespace MathUtil
 {
-template<class T>
-inline void Clamp(T* val, const T& min, const T& max)
+
+template <typename T>
+constexpr T SNANConstant()
 {
-	if (*val < min)
-		*val = min;
-	else if (*val > max)
-		*val = max;
+	return std::numeric_limits<T>::signaling_NaN();
 }
 
-template<class T>
-inline T Clamp(const T val, const T& min, const T& max)
+#ifdef _MSC_VER
+
+// MSVC needs a workaround, because its std::numeric_limits<double>::signaling_NaN()
+// will use __builtin_nans, which is improperly handled by the compiler and generates
+// a bad constant. Here we go back to the version MSVC used before the builtin.
+// TODO: Remove this and use numeric_limits directly whenever this bug is fixed.
+template <>
+constexpr double SNANConstant()
 {
-	T ret = val;
-	Clamp(&ret, min, max);
-	return ret;
+	return (_CSTD _Snan._Double);
+}
+template <>
+constexpr float SNANConstant()
+{
+	return (_CSTD _Snan._Float);
+}
+
+#endif
+
+template<class T>
+constexpr T Clamp(const T val, const T& min, const T& max)
+{
+	return std::max(min, std::min(max, val));
+}
+
+constexpr bool IsPow2(u32 imm)
+{
+	return (imm & (imm - 1)) == 0;
 }
 
 // The most significant bit of the fraction is an is-quiet bit on all architectures we care about.
@@ -55,19 +76,6 @@ union IntFloat {
 	explicit IntFloat(u32 _i) : i(_i) {}
 	explicit IntFloat(float _f) : f(_f) {}
 };
-
-inline bool IsINF(double d)
-{
-	IntDouble x(d);
-	return (x.i & ~DOUBLE_SIGN) == DOUBLE_EXP;
-}
-
-inline bool IsNAN(double d)
-{
-	IntDouble x(d);
-	return ((x.i & DOUBLE_EXP) == DOUBLE_EXP) &&
-	       ((x.i & DOUBLE_FRAC) != DOUBLE_ZERO);
-}
 
 inline bool IsQNAN(double d)
 {
@@ -123,22 +131,33 @@ u32 ClassifyDouble(double dvalue);
 // More efficient float version.
 u32 ClassifyFloat(float fvalue);
 
+extern const int frsqrte_expected_base[];
+extern const int frsqrte_expected_dec[];
+extern const int fres_expected_base[];
+extern const int fres_expected_dec[];
+
+// PowerPC approximation algorithms
+double ApproximateReciprocalSquareRoot(double val);
+double ApproximateReciprocal(double val);
+
 template<class T>
 struct Rectangle
 {
-	T left;
-	T top;
-	T right;
-	T bottom;
+	T left{};
+	T top{};
+	T right{};
+	T bottom{};
 
-	Rectangle()
-	{ }
+	constexpr Rectangle() = default;
 
-	Rectangle(T theLeft, T theTop, T theRight, T theBottom)
+	constexpr Rectangle(T theLeft, T theTop, T theRight, T theBottom)
 		: left(theLeft), top(theTop), right(theRight), bottom(theBottom)
-	{ }
+	{}
 
-	bool operator==(const Rectangle& r) { return left==r.left && top==r.top && right==r.right && bottom==r.bottom; }
+	constexpr bool operator==(const Rectangle& r) const
+	{
+		return left == r.left && top == r.top && right == r.right && bottom == r.bottom;
+	}
 
 	T GetWidth() const { return abs(right - left); }
 	T GetHeight() const { return abs(bottom - top); }
@@ -147,27 +166,24 @@ struct Rectangle
 	// this Clamp.
 	void ClampLL(T x1, T y1, T x2, T y2)
 	{
-		if (left < x1) left = x1;
-		if (right > x2) right = x2;
-		if (top > y1) top = y1;
-		if (bottom < y2) bottom = y2;
+		left   = Clamp(left, x1, x2);
+		right  = Clamp(right, x1, x2);
+		top    = Clamp(top, y2, y1);
+		bottom = Clamp(bottom, y2, y1);
 	}
 
 	// If the rectangle is in a coordinate system with an upper-left origin,
 	// use this Clamp.
 	void ClampUL(T x1, T y1, T x2, T y2)
 	{
-		if (left < x1) left = x1;
-		if (right > x2) right = x2;
-		if (top < y1) top = y1;
-		if (bottom > y2) bottom = y2;
+		left   = Clamp(left, x1, x2);
+		right  = Clamp(right, x1, x2);
+		top    = Clamp(top, y1, y2);
+		bottom = Clamp(bottom, y1, y2);
 	}
 };
 
 }  // namespace MathUtil
-
-inline float pow2f(float x) {return x * x;}
-inline double pow2(double x) {return x * x;}
 
 float MathFloatVectorSum(const std::vector<float>&);
 
@@ -175,12 +191,12 @@ float MathFloatVectorSum(const std::vector<float>&);
 #define ROUND_DOWN(x, a) ((x) & ~((a) - 1))
 
 // Rounds down. 0 -> undefined
-inline int Log2(u64 val)
+inline int IntLog2(u64 val)
 {
 #if defined(__GNUC__)
 	return 63 - __builtin_clzll(val);
 
-#elif defined(_MSC_VER) && _ARCH_64
+#elif defined(_MSC_VER)
 	unsigned long result = -1;
 	_BitScanReverse64(&result, val);
 	return result;
@@ -202,16 +218,16 @@ inline int Log2(u64 val)
 class Matrix33
 {
 public:
-	static void LoadIdentity(Matrix33 &mtx);
+	static void LoadIdentity(Matrix33& mtx);
 
 	// set mtx to be a rotation matrix around the x axis
-	static void RotateX(Matrix33 &mtx, float rad);
+	static void RotateX(Matrix33& mtx, float rad);
 	// set mtx to be a rotation matrix around the y axis
-	static void RotateY(Matrix33 &mtx, float rad);
+	static void RotateY(Matrix33& mtx, float rad);
 
 	// set result = a x b
-	static void Multiply(const Matrix33 &a, const Matrix33 &b, Matrix33 &result);
-	static void Multiply(const Matrix33 &a, const float vec[3], float result[3]);
+	static void Multiply(const Matrix33& a, const Matrix33& b, Matrix33& result);
+	static void Multiply(const Matrix33& a, const float vec[3], float result[3]);
 
 	float data[9];
 };
@@ -219,13 +235,14 @@ public:
 class Matrix44
 {
 public:
-	static void LoadIdentity(Matrix44 &mtx);
-	static void LoadMatrix33(Matrix44 &mtx, const Matrix33 &m33);
-	static void Set(Matrix44 &mtx, const float mtxArray[16]);
+	static void LoadIdentity(Matrix44& mtx);
+	static void LoadMatrix33(Matrix44& mtx, const Matrix33& m33);
+	static void Set(Matrix44& mtx, const float mtxArray[16]);
 
-	static void Translate(Matrix44 &mtx, const float vec[3]);
+	static void Translate(Matrix44& mtx, const float vec[3]);
+	static void Shear(Matrix44& mtx, const float a, const float b = 0);
 
-	static void Multiply(const Matrix44 &a, const Matrix44 &b, Matrix44 &result);
+	static void Multiply(const Matrix44& a, const Matrix44& b, Matrix44& result);
 
 	float data[16];
 };

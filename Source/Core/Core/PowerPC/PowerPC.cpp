@@ -1,21 +1,19 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
-#include "Common/Atomic.h"
+#include "Common/Assert.h"
 #include "Common/ChunkFile.h"
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 #include "Common/FPURoundMode.h"
 #include "Common/MathUtil.h"
+#include "Common/Logging/Log.h"
 
-#include "Core/Core.h"
-#include "Core/CoreTiming.h"
+#include "Core/ConfigManager.h"
 #include "Core/Host.h"
 #include "Core/HW/CPU.h"
-#include "Core/HW/EXI.h"
 #include "Core/HW/Memmap.h"
 #include "Core/HW/SystemTimers.h"
-
 #include "Core/PowerPC/CPUCoreBase.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -23,18 +21,18 @@
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 
 
-CPUCoreBase *cpu_core_base;
-
 namespace PowerPC
 {
 
 // STATE_TO_SAVE
-PowerPCState GC_ALIGNED16(ppcState);
-static volatile CPUState state = CPU_POWERDOWN;
+PowerPCState ppcState;
 
-Interpreter * const interpreter = Interpreter::getInstance();
-static CoreMode mode;
+static CPUCoreBase* s_cpu_core_base             = nullptr;
+static bool         s_cpu_core_base_is_injected = false;
+Interpreter* const  s_interpreter               = Interpreter::getInstance();
+static CoreMode     s_mode                      = MODE_INTERPRETER;
 
+Watches watches;
 BreakPoints breakpoints;
 MemChecks memchecks;
 PPCDebugInterface debug_interface;
@@ -114,128 +112,146 @@ static void ResetRegisters()
 
 void Init(int cpu_core)
 {
+	// NOTE: This function runs on EmuThread, not the CPU Thread.
+	//   Changing the rounding mode has a limited effect.
 	FPURoundMode::SetPrecisionMode(FPURoundMode::PREC_53);
 
 	memset(ppcState.sr, 0, sizeof(ppcState.sr));
-	ppcState.DebugCount = 0;
-	ppcState.dtlb_last = 0;
-	memset(ppcState.dtlb_va, 0, sizeof(ppcState.dtlb_va));
-	memset(ppcState.dtlb_pa, 0, sizeof(ppcState.dtlb_pa));
-	ppcState.itlb_last = 0;
-	memset(ppcState.itlb_va, 0, sizeof(ppcState.itlb_va));
-	memset(ppcState.itlb_pa, 0, sizeof(ppcState.itlb_pa));
 	ppcState.pagetable_base = 0;
 	ppcState.pagetable_hashmask = 0;
+
+	for (int tlb = 0; tlb < 2; tlb++)
+	{
+		for (int set = 0; set < 64; set++)
+		{
+			ppcState.tlb[tlb][set].recent = 0;
+			for (int way = 0; way < 2; way++)
+			{
+				ppcState.tlb[tlb][set].paddr[way] = 0;
+				ppcState.tlb[tlb][set].pte[way] = 0;
+				ppcState.tlb[tlb][set].tag[way] = TLB_TAG_INVALID;
+			}
+		}
+	}
 
 	ResetRegisters();
 	PPCTables::InitTables(cpu_core);
 
 	// We initialize the interpreter because
 	// it is used on boot and code window independently.
-	interpreter->Init();
+	s_interpreter->Init();
 
 	switch (cpu_core)
 	{
-		case 0:
+	case PowerPC::CORE_INTERPRETER:
+		s_cpu_core_base = s_interpreter;
+		break;
+
+	default:
+		s_cpu_core_base = JitInterface::InitJitCore(cpu_core);
+		if (!s_cpu_core_base) // Handle Situations where JIT core isn't available
 		{
-			cpu_core_base = interpreter;
-			break;
+			WARN_LOG(POWERPC, "Jit core %d not available. Defaulting to interpreter.", cpu_core);
+			s_cpu_core_base = s_interpreter;
 		}
-		default:
-			cpu_core_base = JitInterface::InitJitCore(cpu_core);
-			if (!cpu_core_base) // Handle Situations where JIT core isn't available
-			{
-				WARN_LOG(POWERPC, "Jit core %d not available. Defaulting to interpreter.", cpu_core);
-				cpu_core_base = interpreter;
-			}
 		break;
 	}
 
-	if (cpu_core_base != interpreter)
+	if (s_cpu_core_base != s_interpreter)
 	{
-		mode = MODE_JIT;
+		s_mode = MODE_JIT;
 	}
 	else
 	{
-		mode = MODE_INTERPRETER;
+		s_mode = MODE_INTERPRETER;
 	}
-	state = CPU_STEPPING;
 
 	ppcState.iCache.Init();
+
+	if (SConfig::GetInstance().bEnableDebugging)
+		breakpoints.ClearAllTemporary();
 }
 
 void Shutdown()
 {
+	InjectExternalCPUCore(nullptr);
 	JitInterface::Shutdown();
-	interpreter->Shutdown();
-	cpu_core_base = nullptr;
-	state = CPU_POWERDOWN;
+	s_interpreter->Shutdown();
+	s_cpu_core_base = nullptr;
 }
 
 CoreMode GetMode()
 {
-	return mode;
+	return !s_cpu_core_base_is_injected ? s_mode : MODE_INTERPRETER;
 }
 
-void SetMode(CoreMode new_mode)
+static void ApplyMode()
 {
-	if (new_mode == mode)
-		return;  // We don't need to do anything.
-
-	mode = new_mode;
-
-	switch (mode)
+	switch (s_mode)
 	{
 	case MODE_INTERPRETER:  // Switching from JIT to interpreter
-		cpu_core_base = interpreter;
+		s_cpu_core_base = s_interpreter;
 		break;
 
 	case MODE_JIT:  // Switching from interpreter to JIT.
 		// Don't really need to do much. It'll work, the cache will refill itself.
-		cpu_core_base = JitInterface::GetCore();
-		if (!cpu_core_base) // Has a chance to not get a working JIT core if one isn't active on host
-			cpu_core_base = interpreter;
+		s_cpu_core_base = JitInterface::GetCore();
+		if (!s_cpu_core_base) // Has a chance to not get a working JIT core if one isn't active on host
+			s_cpu_core_base = s_interpreter;
 		break;
 	}
 }
 
+void SetMode(CoreMode new_mode)
+{
+	if (new_mode == s_mode)
+		return;  // We don't need to do anything.
+
+	s_mode = new_mode;
+
+	// If we're using an external CPU core implementation then don't do anything.
+	if (s_cpu_core_base_is_injected)
+		return;
+
+	ApplyMode();
+}
+
+const char* GetCPUName()
+{
+	return s_cpu_core_base->GetName();
+}
+
+void InjectExternalCPUCore(CPUCoreBase* new_cpu)
+{
+	// Previously injected.
+	if (s_cpu_core_base_is_injected)
+		s_cpu_core_base->Shutdown();
+
+	// nullptr means just remove
+	if (!new_cpu)
+	{
+		if (s_cpu_core_base_is_injected)
+		{
+			s_cpu_core_base_is_injected = false;
+			ApplyMode();
+		}
+		return;
+	}
+
+	new_cpu->Init();
+	s_cpu_core_base = new_cpu;
+	s_cpu_core_base_is_injected = true;
+}
+
 void SingleStep()
 {
-	cpu_core_base->SingleStep();
+	s_cpu_core_base->SingleStep();
 }
 
 void RunLoop()
 {
-	state = CPU_RUNNING;
-	cpu_core_base->Run();
 	Host_UpdateDisasmDialog();
-}
-
-CPUState GetState()
-{
-	return state;
-}
-
-volatile CPUState *GetStatePtr()
-{
-	return &state;
-}
-
-void Start()
-{
-	state = CPU_RUNNING;
-	Host_UpdateDisasmDialog();
-}
-
-void Pause()
-{
-	state = CPU_STEPPING;
-	Host_UpdateDisasmDialog();
-}
-
-void Stop()
-{
-	state = CPU_POWERDOWN;
+	s_cpu_core_base->Run();
 	Host_UpdateDisasmDialog();
 }
 
@@ -300,11 +316,6 @@ void UpdatePerformanceMonitor(u32 cycles, u32 num_load_stores, u32 num_fp_inst)
 
 void CheckExceptions()
 {
-	// Make sure we are checking against the latest EXI status. This is required
-	// for devices which interrupt frequently, such as the gc mic
-	ExpansionInterface::UpdateInterrupts();
-
-	// Read volatile data once
 	u32 exceptions = ppcState.Exceptions;
 
 	// Example procedure:
@@ -334,7 +345,7 @@ void CheckExceptions()
 		PC = NPC = 0x00000400;
 
 		INFO_LOG(POWERPC, "EXCEPTION_ISI");
-		Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_ISI);
+		ppcState.Exceptions &= ~EXCEPTION_ISI;
 	}
 	else if (exceptions & EXCEPTION_PROGRAM)
 	{
@@ -346,7 +357,7 @@ void CheckExceptions()
 		PC = NPC = 0x00000700;
 
 		INFO_LOG(POWERPC, "EXCEPTION_PROGRAM");
-		Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_PROGRAM);
+		ppcState.Exceptions &= ~EXCEPTION_PROGRAM;
 	}
 	else if (exceptions & EXCEPTION_SYSCALL)
 	{
@@ -357,7 +368,7 @@ void CheckExceptions()
 		PC = NPC = 0x00000C00;
 
 		INFO_LOG(POWERPC, "EXCEPTION_SYSCALL (PC=%08x)", PC);
-		Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_SYSCALL);
+		ppcState.Exceptions &= ~EXCEPTION_SYSCALL;
 	}
 	else if (exceptions & EXCEPTION_FPU_UNAVAILABLE)
 	{
@@ -369,8 +380,14 @@ void CheckExceptions()
 		PC = NPC = 0x00000800;
 
 		INFO_LOG(POWERPC, "EXCEPTION_FPU_UNAVAILABLE");
-		Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_FPU_UNAVAILABLE);
+		ppcState.Exceptions &= ~EXCEPTION_FPU_UNAVAILABLE;
 	}
+#ifdef ENABLE_MEM_CHECK
+	else if (exceptions & EXCEPTION_FAKE_MEMCHECK_HIT)
+	{
+		ppcState.Exceptions &= ~EXCEPTION_DSI & ~EXCEPTION_FAKE_MEMCHECK_HIT;
+	}
+#endif
 	else if (exceptions & EXCEPTION_DSI)
 	{
 		SRR0 = PC;
@@ -381,7 +398,7 @@ void CheckExceptions()
 		//DSISR and DAR regs are changed in GenerateDSIException()
 
 		INFO_LOG(POWERPC, "EXCEPTION_DSI");
-		Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_DSI);
+		ppcState.Exceptions &= ~EXCEPTION_DSI;
 	}
 	else if (exceptions & EXCEPTION_ALIGNMENT)
 	{
@@ -396,7 +413,7 @@ void CheckExceptions()
 		//TODO crazy amount of DSISR options to check out
 
 		INFO_LOG(POWERPC, "EXCEPTION_ALIGNMENT");
-		Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_ALIGNMENT);
+		ppcState.Exceptions &= ~EXCEPTION_ALIGNMENT;
 	}
 
 	// EXTERNAL INTERRUPT
@@ -412,7 +429,7 @@ void CheckExceptions()
 			PC = NPC = 0x00000500;
 
 			INFO_LOG(POWERPC, "EXCEPTION_EXTERNAL_INT");
-			Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_EXTERNAL_INT);
+			ppcState.Exceptions &= ~EXCEPTION_EXTERNAL_INT;
 
 			_dbg_assert_msg_(POWERPC, (SRR1 & 0x02) != 0, "EXTERNAL_INT unrecoverable???");
 		}
@@ -425,7 +442,7 @@ void CheckExceptions()
 			PC = NPC = 0x00000F00;
 
 			INFO_LOG(POWERPC, "EXCEPTION_PERFORMANCE_MONITOR");
-			Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_PERFORMANCE_MONITOR);
+			ppcState.Exceptions &= ~EXCEPTION_PERFORMANCE_MONITOR;
 		}
 		else if (exceptions & EXCEPTION_DECREMENTER)
 		{
@@ -436,18 +453,17 @@ void CheckExceptions()
 			PC = NPC = 0x00000900;
 
 			INFO_LOG(POWERPC, "EXCEPTION_DECREMENTER");
-			Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_DECREMENTER);
+			ppcState.Exceptions &= ~EXCEPTION_DECREMENTER;
 		}
 	}
 }
 
 void CheckExternalExceptions()
 {
-	// Read volatile data once
 	u32 exceptions = ppcState.Exceptions;
 
 	// EXTERNAL INTERRUPT
-	if (MSR & 0x0008000) //hacky...the exception shouldn't be generated if EE isn't set...
+	if (exceptions && (MSR & 0x0008000))  // Handling is delayed until MSR.EE=1.
 	{
 		if (exceptions & EXCEPTION_EXTERNAL_INT)
 		{
@@ -459,7 +475,7 @@ void CheckExternalExceptions()
 			PC = NPC = 0x00000500;
 
 			INFO_LOG(POWERPC, "EXCEPTION_EXTERNAL_INT");
-			Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_EXTERNAL_INT);
+			ppcState.Exceptions &= ~EXCEPTION_EXTERNAL_INT;
 
 			_dbg_assert_msg_(POWERPC, (SRR1 & 0x02) != 0, "EXTERNAL_INT unrecoverable???");
 		}
@@ -472,7 +488,7 @@ void CheckExternalExceptions()
 			PC = NPC = 0x00000F00;
 
 			INFO_LOG(POWERPC, "EXCEPTION_PERFORMANCE_MONITOR");
-			Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_PERFORMANCE_MONITOR);
+			ppcState.Exceptions &= ~EXCEPTION_PERFORMANCE_MONITOR;
 		}
 		else if (exceptions & EXCEPTION_DECREMENTER)
 		{
@@ -483,7 +499,7 @@ void CheckExternalExceptions()
 			PC = NPC = 0x00000900;
 
 			INFO_LOG(POWERPC, "EXCEPTION_DECREMENTER");
-			Common::AtomicAnd(ppcState.Exceptions, ~EXCEPTION_DECREMENTER);
+			ppcState.Exceptions &= ~EXCEPTION_DECREMENTER;
 		}
 		else
 		{
@@ -497,23 +513,10 @@ void CheckBreakPoints()
 {
 	if (PowerPC::breakpoints.IsAddressBreakPoint(PC))
 	{
-		PowerPC::Pause();
+		CPU::Break();
 		if (PowerPC::breakpoints.IsTempBreakPoint(PC))
 			PowerPC::breakpoints.Remove(PC);
 	}
-}
-
-void OnIdle(u32 _uThreadAddr)
-{
-	u32 nextThread = Memory::Read_U32(_uThreadAddr);
-	//do idle skipping
-	if (nextThread == 0)
-		CoreTiming::Idle();
-}
-
-void OnIdleIL()
-{
-	CoreTiming::Idle();
 }
 
 }  // namespace

@@ -1,32 +1,45 @@
-// Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2
+// Copyright 2008 Dolphin Emulator Project
+// Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include <array>
+#include <memory>
+
 #include "Common/ChunkFile.h"
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 
 #include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
 #include "Core/Movie.h"
 #include "Core/HW/EXI.h"
+#include "Core/HW/EXI_Channel.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/Sram.h"
-#include "Core/PowerPC/PowerPC.h"
 
 SRAM g_SRAM;
+bool g_SRAM_netplay_initialized = false;
 
 namespace ExpansionInterface
 {
 
 static int changeDevice;
+static int updateInterrupts;
 
-static CEXIChannel *g_Channels[MAX_EXI_CHANNELS];
+static std::array<std::unique_ptr<CEXIChannel>, MAX_EXI_CHANNELS> g_Channels;
+
+static void ChangeDeviceCallback(u64 userdata, s64 cyclesLate);
+static void UpdateInterruptsCallback(u64 userdata, s64 cycles_late);
+
 void Init()
 {
-	InitSRAM();
+	if (!g_SRAM_netplay_initialized)
+	{
+		InitSRAM();
+	}
+
 	for (u32 i = 0; i < MAX_EXI_CHANNELS; i++)
-		g_Channels[i] = new CEXIChannel(i);
+		g_Channels[i] = std::make_unique<CEXIChannel>(i);
 
 	if (Movie::IsPlayingInput() && Movie::IsConfigSaved())
 	{
@@ -43,15 +56,13 @@ void Init()
 	g_Channels[2]->AddDevice(EXIDEVICE_AD16,                            0);
 
 	changeDevice = CoreTiming::RegisterEvent("ChangeEXIDevice", ChangeDeviceCallback);
+	updateInterrupts = CoreTiming::RegisterEvent("EXIUpdateInterrupts", UpdateInterruptsCallback);
 }
 
 void Shutdown()
 {
 	for (auto& channel : g_Channels)
-	{
-		delete channel;
-		channel = nullptr;
-	}
+		channel.reset();
 }
 
 void DoState(PointerWrap &p)
@@ -80,13 +91,13 @@ void RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 	}
 }
 
-void ChangeDeviceCallback(u64 userdata, int cyclesLate)
+static void ChangeDeviceCallback(u64 userdata, s64 cyclesLate)
 {
 	u8 channel = (u8)(userdata >> 32);
 	u8 type = (u8)(userdata >> 16);
 	u8 num = (u8)userdata;
 
-	g_Channels[channel]->AddDevice((TEXIDevices)type, num);
+	g_Channels.at(channel)->AddDevice((TEXIDevices)type, num);
 }
 
 void ChangeDevice(const u8 channel, const TEXIDevices device_type, const u8 device_num)
@@ -99,7 +110,7 @@ void ChangeDevice(const u8 channel, const TEXIDevices device_type, const u8 devi
 
 CEXIChannel* GetChannel(u32 index)
 {
-	return g_Channels[index];
+	return g_Channels.at(index).get();
 }
 
 IEXIDevice* FindDevice(TEXIDevices device_type, int customIndex)
@@ -126,6 +137,21 @@ void UpdateInterrupts()
 		causeInt |= channel->IsCausingInterrupt();
 
 	ProcessorInterface::SetInterrupt(ProcessorInterface::INT_CAUSE_EXI, causeInt);
+}
+
+static void UpdateInterruptsCallback(u64 userdata, s64 cycles_late)
+{
+	UpdateInterrupts();
+}
+
+void ScheduleUpdateInterrupts_Threadsafe(int cycles_late)
+{
+	CoreTiming::ScheduleEvent_Threadsafe(cycles_late, updateInterrupts, 0);
+}
+
+void ScheduleUpdateInterrupts(int cycles_late)
+{
+	CoreTiming::ScheduleEvent(cycles_late, updateInterrupts, 0);
 }
 
 } // end of namespace ExpansionInterface
